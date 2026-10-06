@@ -1,0 +1,22 @@
+{
+  "fixtureId": "risotto.step5",
+  "recipeId": "rcp_b688e9e9ff",
+  "actions": [
+    {
+      "stepId": "stp_633e628dff",
+      "progress": "done"
+    },
+    {
+      "stepId": "stp_bdcf181778",
+      "progress": "done"
+    },
+    {
+      "stepId": "stp_6216193b43",
+      "progress": "done"
+    },
+    {
+      "stepId": "stp_284f435fb7",
+      "progress": "done"
+    }
+  ]
+}

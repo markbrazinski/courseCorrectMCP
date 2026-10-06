@@ -1,0 +1,14 @@
+{
+  "fixtureId": "scones.step3",
+  "recipeId": "rcp_44097a23a6",
+  "actions": [
+    {
+      "stepId": "stp_fc68bb9255",
+      "progress": "done"
+    },
+    {
+      "stepId": "stp_4e351eb9cf",
+      "progress": "done"
+    }
+  ]
+}

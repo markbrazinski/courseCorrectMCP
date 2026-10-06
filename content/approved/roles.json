@@ -1,0 +1,20 @@
+{
+  "schema": "cc-roles/1",
+  "decisionRef": "content-decisions.md#OD-4",
+  "roles": [
+    { "kindId": "heavy-cream", "techniqueId": "MIX_DOUGH", "functions": ["LIQUID", "FAT"], "note": "Cream stirred into a dough is its liquid and its fat." },
+    { "kindId": "heavy-cream", "techniqueId": "BRUSH", "functions": ["BROWNING"], "note": "Cream brushed on top is there for browning." },
+    { "kindId": "heavy-cream", "techniqueId": "WHIP", "functions": ["AERATION"], "note": "Whipped cream holds air." },
+    { "kindId": "dry-white-wine", "techniqueId": "DEGLAZE", "functions": ["LIQUID", "ACIDITY", "FLAVOR"], "note": "Wine poured in to deglaze is liquid, acidity and flavor." },
+    { "kindId": "unsalted-vegetable-stock", "techniqueId": "LADLE_STOCK", "functions": ["LIQUID"], "note": "Stock ladled into risotto is its cooking liquid." }
+  ],
+  "cues": {
+    "MIX_DOUGH": ["\\bdough\\b", "(?:^|[.;!]\\s+)stir in\\b"],
+    "BRUSH": ["(?:^|[.;!]\\s+)brush\\b"],
+    "WHIP": ["(?:^|[.;!]\\s+)whip\\b"],
+    "DEGLAZE": ["\\bpour in\\b.*\\bwine\\b"],
+    "LADLE_STOCK": ["\\bladle"],
+    "COMBINE_DRY": ["(?:^|[.;!]\\s+)whisk\\b.*\\b(?:flour|dry)\\b"],
+    "OFF_HEAT_FINISH": ["\\boff the heat\\b"]
+  }
+}

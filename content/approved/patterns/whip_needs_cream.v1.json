@@ -1,0 +1,12 @@
+{
+  "schema": "cc-pattern/1", "kind": "REFUSAL", "patternId": "whip_needs_cream", "version": 1,
+  "title": "Milk and butter for cream that must whip",
+  "target": { "ingredientClass": "heavy-cream", "performsAll": ["AERATION"], "stepTechnique": "WHIP" },
+  "slots": [], "applicability": [], "exceptions": [],
+  "evidence": { "quantityStatus": "NONE", "basis": "Authored refusal text from old whip-contrast v2; OD-2 approved for engineering only" },
+  "proposal": { "classes": ["butter", "milk"], "match": "EQUALS" },
+  "response": "NOT_FUNCTIONALLY_EQUIVALENT",
+  "requiredFunctionLabel": "whipped topping",
+  "text": "This catalog doesn't accept milk and butter in place of cream that has to be whipped: a milk-and-butter mixture won't hold air or whip into peaks. This is about that replacement only.",
+  "scopeNote": "This isn't a verdict on every alternative."
+}

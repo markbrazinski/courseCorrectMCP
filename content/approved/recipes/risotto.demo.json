@@ -1,0 +1,258 @@
+{
+  "schema": "cc-recipe-src/1",
+  "recipeId": "rcp_b688e9e9ff",
+  "title": "Risotto with Parmesan",
+  "meta": "Serves 4 · about 45 minutes",
+  "volumeSystem": "METRIC",
+  "source": {
+    "label": "Owner-authored engineering recipe (HF v1 fixture)",
+    "rights": "OWNER_AUTHORED"
+  },
+  "decisionRef": "content-decisions.md#OD-3",
+  "ingredients": [
+    {
+      "id": "ing_b2e677800c",
+      "name": "Unsalted vegetable stock",
+      "kind": "unsalted-vegetable-stock",
+      "listed": "900 ML"
+    },
+    {
+      "id": "ing_7a65a1fcaf",
+      "name": "Butter",
+      "kind": "unsalted-butter",
+      "listed": "60 g"
+    },
+    {
+      "id": "ing_1f7199949a",
+      "name": "Onion, finely chopped",
+      "kind": "onion",
+      "listed": "1"
+    },
+    {
+      "id": "ing_cc8ef28613",
+      "name": "Garlic, minced",
+      "kind": "garlic",
+      "listed": "1 clove"
+    },
+    {
+      "id": "ing_53aab7b64e",
+      "name": "Arborio rice",
+      "kind": "arborio-rice",
+      "listed": "300 g"
+    },
+    {
+      "id": "ing_2a78639f0f",
+      "name": "Dry white wine",
+      "kind": "dry-white-wine",
+      "listed": "120 ML"
+    },
+    {
+      "id": "ing_4c0be24083",
+      "name": "Parmesan, grated",
+      "kind": "parmesan",
+      "listed": "50 g"
+    },
+    {
+      "id": "ing_da68e1bab1",
+      "name": "Salt",
+      "kind": "salt",
+      "listed": "to taste"
+    }
+  ],
+  "steps": [
+    {
+      "id": "stp_633e628dff",
+      "title": "Heat the stock",
+      "technique": "HEAT_STOCK",
+      "text": "Bring {use:use_f0c64c953e} to a simmer and keep it hot."
+    },
+    {
+      "id": "stp_bdcf181778",
+      "title": "Soften the onion",
+      "technique": "SOFTEN",
+      "text": "Melt {use:use_b95dfa003c} in a wide pan over medium heat. Add {use:use_680ed65c48} and cook until soft, about 5 minutes.",
+      "duration": [
+        300,
+        "5 min"
+      ]
+    },
+    {
+      "id": "stp_6216193b43",
+      "title": "Add the garlic",
+      "technique": "SAUTE",
+      "text": "Add {use:use_6625d00d5e} and cook for 30 seconds.",
+      "duration": [
+        30,
+        "30 sec"
+      ]
+    },
+    {
+      "id": "stp_284f435fb7",
+      "title": "Toast the rice",
+      "technique": "TOAST_RICE",
+      "text": "Add {use:use_519a7195cc} and stir until the edges turn translucent, 2–3 minutes.",
+      "duration": [
+        120,
+        "2 min · recipe says 2–3"
+      ]
+    },
+    {
+      "id": "stp_90886a9713",
+      "title": "Add the wine",
+      "technique": "DEGLAZE",
+      "text": "Pour in {use:use_9e5a387dfb} and stir until absorbed."
+    },
+    {
+      "id": "stp_c4de53b9b5",
+      "title": "Cook with the stock",
+      "technique": "LADLE_STOCK",
+      "text": "Add {use:use_e6d0cc2a3a} a ladle at a time, stirring, until the rice is creamy and just tender, 18–20 minutes.",
+      "duration": [
+        1080,
+        "18 min · recipe says 18–20"
+      ]
+    },
+    {
+      "id": "stp_a7a4b466eb",
+      "title": "Finish",
+      "technique": "OFF_HEAT_FINISH",
+      "text": "Off the heat, stir in {use:use_4b514b988b} and {use:use_0d7ebe8986}. Season with {use:use_2c8b094797}."
+    },
+    {
+      "id": "stp_4e8f239de3",
+      "title": "Rest and serve",
+      "technique": "REST",
+      "text": "Rest for 1 minute, then serve.",
+      "duration": [
+        60,
+        "1 min"
+      ]
+    }
+  ],
+  "uses": [
+    {
+      "id": "use_f0c64c953e",
+      "ingredient": "ing_b2e677800c",
+      "step": "stp_633e628dff",
+      "amount": "900 ML",
+      "prepares": "use_e6d0cc2a3a",
+      "display": "900 ML unsalted vegetable stock",
+      "functions": []
+    },
+    {
+      "id": "use_b95dfa003c",
+      "ingredient": "ing_7a65a1fcaf",
+      "step": "stp_bdcf181778",
+      "amount": "30 g",
+      "functions": [
+        {
+          "id": "FAT",
+          "label": "cooking fat"
+        }
+      ]
+    },
+    {
+      "id": "use_680ed65c48",
+      "ingredient": "ing_1f7199949a",
+      "step": "stp_bdcf181778",
+      "amount": "1",
+      "display": "the onion",
+      "functions": [
+        {
+          "id": "FLAVOR",
+          "label": "flavor base"
+        }
+      ]
+    },
+    {
+      "id": "use_6625d00d5e",
+      "ingredient": "ing_cc8ef28613",
+      "step": "stp_6216193b43",
+      "amount": "1 clove",
+      "display": "the garlic",
+      "functions": [
+        {
+          "id": "FLAVOR",
+          "label": "flavor base"
+        }
+      ]
+    },
+    {
+      "id": "use_519a7195cc",
+      "ingredient": "ing_53aab7b64e",
+      "step": "stp_284f435fb7",
+      "amount": "300 g",
+      "functions": [
+        {
+          "id": "STRUCTURE",
+          "label": "main · starch"
+        }
+      ]
+    },
+    {
+      "id": "use_9e5a387dfb",
+      "ingredient": "ing_2a78639f0f",
+      "step": "stp_90886a9713",
+      "amount": "120 ML",
+      "functions": [
+        "LIQUID",
+        "ACIDITY",
+        {
+          "id": "FLAVOR",
+          "label": "aroma"
+        }
+      ]
+    },
+    {
+      "id": "use_e6d0cc2a3a",
+      "ingredient": "ing_b2e677800c",
+      "step": "stp_c4de53b9b5",
+      "amount": "900 ML",
+      "display": "the hot stock",
+      "functions": [
+        {
+          "id": "LIQUID",
+          "label": "cooking liquid"
+        }
+      ]
+    },
+    {
+      "id": "use_4b514b988b",
+      "ingredient": "ing_7a65a1fcaf",
+      "step": "stp_a7a4b466eb",
+      "amount": "30 g",
+      "functions": [
+        {
+          "id": "FAT",
+          "label": "richness"
+        }
+      ]
+    },
+    {
+      "id": "use_0d7ebe8986",
+      "ingredient": "ing_4c0be24083",
+      "step": "stp_a7a4b466eb",
+      "amount": "50 g",
+      "display": "50 g grated Parmesan",
+      "functions": [
+        {
+          "id": "FLAVOR",
+          "label": "savory · richness"
+        }
+      ]
+    },
+    {
+      "id": "use_2c8b094797",
+      "ingredient": "ing_da68e1bab1",
+      "step": "stp_a7a4b466eb",
+      "amount": "to taste",
+      "display": "salt",
+      "functions": [
+        {
+          "id": "FLAVOR",
+          "label": "seasoning"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,207 @@
+{
+  "schema": "cc-recipe-src/1",
+  "recipeId": "rcp_9c69893d86",
+  "title": "Strawberry Shortcake",
+  "meta": "Serves 6 · about 1 hour",
+  "volumeSystem": "METRIC",
+  "source": {
+    "label": "Owner-authored engineering recipe (HF v1 fixture)",
+    "rights": "OWNER_AUTHORED"
+  },
+  "decisionRef": "content-decisions.md#OD-3",
+  "ingredients": [
+    {
+      "id": "ing_eb626efbca",
+      "name": "Plain flour",
+      "kind": "plain-flour",
+      "listed": "250 g"
+    },
+    {
+      "id": "ing_abfb1fa318",
+      "name": "Sugar",
+      "kind": "white-sugar",
+      "listed": "45 g"
+    },
+    {
+      "id": "ing_ecdd9145f7",
+      "name": "Baking powder",
+      "kind": "baking-powder",
+      "listed": "2 tsp"
+    },
+    {
+      "id": "ing_da68e1bab1",
+      "name": "Salt",
+      "kind": "salt",
+      "listed": "½ tsp"
+    },
+    {
+      "id": "ing_7a65a1fcaf",
+      "name": "Cold butter, cubed",
+      "kind": "unsalted-butter",
+      "listed": "85 g"
+    },
+    {
+      "id": "ing_14ea95acad",
+      "name": "Heavy cream",
+      "kind": "heavy-cream",
+      "listed": "420 ML"
+    },
+    {
+      "id": "ing_45a9e7ae0b",
+      "name": "Strawberries, sliced",
+      "kind": "strawberry",
+      "listed": "500 g"
+    }
+  ],
+  "steps": [
+    {
+      "id": "stp_3ef84ae77d",
+      "title": "Heat the oven",
+      "technique": "PREHEAT",
+      "text": "Heat the oven to 220 °C and line a baking tray."
+    },
+    {
+      "id": "stp_fea4fc0db4",
+      "title": "Mix the dry ingredients",
+      "technique": "COMBINE_DRY",
+      "text": "Whisk {use:use_48c1776267}, {use:use_312de22b19}, {use:use_438a2858b3} and {use:use_c6ba12e49e}."
+    },
+    {
+      "id": "stp_edb7756ae6",
+      "title": "Cut in the butter",
+      "technique": "RUB_IN",
+      "text": "Rub in {use:use_35facd3524} until the mixture looks like coarse crumbs."
+    },
+    {
+      "id": "stp_27650669a7",
+      "title": "Make the dough",
+      "technique": "MIX_DOUGH",
+      "text": "Stir in {use:use_2e7b0ec7aa} until just combined."
+    },
+    {
+      "id": "stp_4d3c259d3e",
+      "title": "Shape and bake",
+      "technique": "BAKE",
+      "text": "Pat into 6 rounds and bake for 15 minutes. Cool on a rack.",
+      "duration": [
+        900,
+        "15 min"
+      ]
+    },
+    {
+      "id": "stp_a926e70857",
+      "title": "Whip the cream",
+      "technique": "WHIP",
+      "text": "Whip {use:use_02c0ac5ad0} with {use:use_3c97196d08} to soft peaks."
+    },
+    {
+      "id": "stp_dbf306074a",
+      "title": "Assemble",
+      "technique": "ASSEMBLE",
+      "text": "Split the shortcakes and fill with {use:use_29ad530cae} and whipped cream."
+    }
+  ],
+  "uses": [
+    {
+      "id": "use_48c1776267",
+      "ingredient": "ing_eb626efbca",
+      "step": "stp_fea4fc0db4",
+      "amount": "250 g",
+      "display": "250 g flour",
+      "functions": [
+        "STRUCTURE"
+      ]
+    },
+    {
+      "id": "use_312de22b19",
+      "ingredient": "ing_abfb1fa318",
+      "step": "stp_fea4fc0db4",
+      "amount": "30 g",
+      "display": "30 g sugar",
+      "functions": [
+        "SWEETNESS"
+      ]
+    },
+    {
+      "id": "use_438a2858b3",
+      "ingredient": "ing_ecdd9145f7",
+      "step": "stp_fea4fc0db4",
+      "amount": "2 tsp",
+      "display": "2 tsp baking powder",
+      "functions": [
+        "LEAVENING"
+      ]
+    },
+    {
+      "id": "use_c6ba12e49e",
+      "ingredient": "ing_da68e1bab1",
+      "step": "stp_fea4fc0db4",
+      "amount": "½ tsp",
+      "display": "½ tsp salt",
+      "functions": [
+        {
+          "id": "FLAVOR",
+          "label": "seasoning"
+        }
+      ]
+    },
+    {
+      "id": "use_35facd3524",
+      "ingredient": "ing_7a65a1fcaf",
+      "step": "stp_edb7756ae6",
+      "amount": "85 g",
+      "display": "85 g cold butter",
+      "functions": [
+        {
+          "id": "FAT",
+          "label": "fat · tenderness"
+        }
+      ]
+    },
+    {
+      "id": "use_2e7b0ec7aa",
+      "ingredient": "ing_14ea95acad",
+      "step": "stp_27650669a7",
+      "amount": "180 ML",
+      "functions": [
+        "LIQUID",
+        "FAT"
+      ]
+    },
+    {
+      "id": "use_02c0ac5ad0",
+      "ingredient": "ing_14ea95acad",
+      "step": "stp_a926e70857",
+      "amount": "240 ML",
+      "functions": [
+        {
+          "id": "AERATION",
+          "label": "whipped topping"
+        }
+      ]
+    },
+    {
+      "id": "use_3c97196d08",
+      "ingredient": "ing_abfb1fa318",
+      "step": "stp_a926e70857",
+      "amount": "15 g",
+      "display": "15 g sugar",
+      "functions": [
+        "SWEETNESS"
+      ]
+    },
+    {
+      "id": "use_29ad530cae",
+      "ingredient": "ing_45a9e7ae0b",
+      "step": "stp_dbf306074a",
+      "amount": "500 g",
+      "display": "the strawberries",
+      "functions": [
+        {
+          "id": "FLAVOR",
+          "label": "filling"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "fixtureId": "shortcake.step6",
+  "recipeId": "rcp_9c69893d86",
+  "actions": [
+    {
+      "stepId": "stp_3ef84ae77d",
+      "progress": "done"
+    },
+    {
+      "stepId": "stp_fea4fc0db4",
+      "progress": "done"
+    },
+    {
+      "stepId": "stp_edb7756ae6",
+      "progress": "done"
+    },
+    {
+      "stepId": "stp_27650669a7",
+      "progress": "done"
+    },
+    {
+      "stepId": "stp_4d3c259d3e",
+      "progress": "done"
+    }
+  ]
+}

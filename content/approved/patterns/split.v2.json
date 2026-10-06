@@ -1,0 +1,46 @@
+{
+  "schema": "cc-pattern/1", "kind": "RECOVERY", "patternId": "split", "version": 2,
+  "title": "Split the wine's jobs",
+  "target": { "ingredientClass": "wine", "performsAll": ["ACIDITY", "LIQUID"], "stepTechnique": "DEGLAZE" },
+  "slots": [
+    { "slot": "stock", "kind": "USE_AFTER_TARGET", "ingredientClass": "cooking-stock", "performsAll": ["LIQUID"], "stepTechnique": "LADLE_STOCK" },
+    { "slot": "finish", "kind": "STEP_AFTER_TARGET", "technique": "OFF_HEAT_FINISH" },
+    { "slot": "rice", "kind": "USE_OF_CLASS", "ingredientClass": "risotto-rice" }
+  ],
+  "applicability": [
+    { "kind": "AMOUNT_IN_RANGE", "slot": "$target", "unit": "ML", "min": { "n": 100, "d": 1 }, "max": { "n": 150, "d": 1 } },
+    { "kind": "AMOUNT_IN_RANGE", "slot": "$rice", "unit": "G", "min": { "n": 280, "d": 1 }, "max": { "n": 320, "d": 1 } }
+  ],
+  "exceptions": [],
+  "evidence": { "quantityStatus": "PROVISIONAL", "basis": "Old engine contract policy qty.split.1; OD-1 approved for engineering only (content-decisions.md)" },
+  "introduces": [{ "local": "acid", "kindId": "lemon-juice", "name": "Lemon juice" }],
+  "quantities": {
+    "stock_now": { "kind": "SCALE", "from": "$target", "sourceUnit": "ML", "factor": { "n": 1, "d": 1 }, "resultUnit": "ML",
+      "inputDomain": [{ "n": 100, "d": 1 }, { "n": 150, "d": 1 }], "increment": { "n": 1, "d": 1 }, "maxAbsError": { "n": 1, "d": 2 },
+      "outputDomain": [{ "n": 100, "d": 1 }, { "n": 150, "d": 1 }] },
+    "acid": { "kind": "SCALE", "from": "$target", "sourceUnit": "ML", "factor": { "n": 1, "d": 12 }, "resultUnit": "ML",
+      "inputDomain": [{ "n": 100, "d": 1 }, { "n": 150, "d": 1 }], "increment": { "n": 1, "d": 1 }, "maxAbsError": { "n": 1, "d": 2 },
+      "outputDomain": [{ "n": 8, "d": 1 }, { "n": 13, "d": 1 }] }
+  },
+  "ops": [
+    { "op": "REPLACE_USE", "use": "$target", "with": { "local": "stock_now", "ingredient": { "slot": "$stock" }, "at": "$target.step", "qty": "stock_now", "prepNote": "hot", "functions": ["LIQUID"], "allowance": null } },
+    { "op": "ADD_USE", "use": { "local": "acid_later", "ingredient": { "introduce": "acid" }, "at": "$finish", "qty": "acid", "prepNote": null, "functions": ["ACIDITY"], "allowance": null }, "placement": "JOIN_USE_LIST" },
+    { "op": "SET_STEP_TITLE", "step": "$target.step", "title": "Add the {classLabel:stock_now}" },
+    { "op": "SET_RESUME", "step": "$target.step" }
+  ],
+  "siblingHandlers": [],
+  "functionAccounting": [
+    { "from": "$target", "functionId": "ACIDITY", "disposition": "MOVED", "to": "acid_later" },
+    { "from": "$target", "functionId": "FLAVOR", "disposition": "DROPPED_WITH_TRADEOFF", "to": null },
+    { "from": "$target", "functionId": "LIQUID", "disposition": "RETAINED", "to": "stock_now" }
+  ],
+  "introducedFunctions": [],
+  "consequence": {
+    "outcomeClass": "FUNCTION_MOVED", "equivalence": "NOT_EQUIVALENT",
+    "headline": "Use hot stock now and lemon juice at the finish instead of the wine.",
+    "reason": "Deglazing liquid and acidity are covered at different steps; the result is not equivalent to cooking with wine.",
+    "tradeoff": "The risotto will taste different, and it won't have the aroma of white wine."
+  },
+  "proposal": { "classes": ["citrus-juice"], "relation": "ADAPTED", "text": "There's no one-for-one lemon swap for the wine here. This plan uses your lemon juice at the finish and more stock now." },
+  "guards": [{ "kind": "CURRENT_STEP_IS", "step": "$target.step" }]
+}

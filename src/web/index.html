@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CourseCorrect</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@600;700&family=Source+Sans+3:wght@400;600;700&display=swap">
+<style>
+/* HF v1 Index Card tokens (rolodex2). State is never color-only: every state also carries a word and a border style. */
+:root{
+  --cc-page:#EEE8DD;--cc-surface:#FFFDF9;--cc-surface-2:#F6F2EA;--cc-chrome:#2A211B;--cc-on-chrome:#FFFCF6;
+  --cc-text:#241C17;--cc-text-2:#54473D;--cc-border:#DCD1C2;--cc-border-strong:#8A7766;
+  --cc-action:#A9321F;--cc-on-action:#FFFFFF;--cc-current:#1D5C58;--cc-on-current:#FFFFFF;
+  --cc-proposed:#8A5300;--cc-proposed-bg:#FFD978;--cc-applied:#2D6436;--cc-applied-bg:#E3EEDD;
+  --cc-attention:#A9321F;--cc-attention-bg:#FBE6E0;--cc-refusal:#54473D;--cc-refusal-bg:#F3EEE6;
+  --cc-focus:#1D5C58;--cc-listening:#A9321F;--cc-processing:#8A5300;--cc-speaking:#1D5C58;
+  --cc-font-head:'Zilla Slab',Georgia,serif;--cc-font-body:'Source Sans 3','Segoe UI',Helvetica,Arial,sans-serif;--cc-font-mono:'Source Sans 3','Segoe UI',Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box}
+html,body,#root{height:100%;margin:0}
+body{background:var(--cc-page);color:var(--cc-text);font-family:var(--cc-font-body)}
+button,input,textarea,select{font-family:inherit;color:var(--cc-text)}
+input,textarea,select{background:var(--cc-surface)}
+:focus-visible{outline:3px solid var(--cc-focus);outline-offset:2px}
+button{cursor:pointer}button:disabled{cursor:not-allowed}
+h1,h2,h3{font-family:var(--cc-font-head);font-weight:700;margin:0;line-height:1.2}
+@keyframes ccIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes ccFlash{0%{background:#FFD978}100%{background:#FFFDF9}}
+@keyframes ccApplied{0%{background:#E3EEDD;box-shadow:0 0 0 4px #2D6436}100%{background:rgba(227,238,221,0);box-shadow:0 0 0 0 rgba(45,100,54,0)}}
+@keyframes ccBar{0%,100%{transform:scaleY(.35)}50%{transform:scaleY(1)}}
+@keyframes ccDot{0%,100%{opacity:.25}50%{opacity:1}}
+@keyframes ccGrow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+.in{animation:ccIn .35s ease-out}
+
+/* buttons: one primary action per view */
+.b{border-radius:10px;padding:12px 20px;font-size:17px;font-weight:600;border:2px solid var(--cc-border-strong);background:var(--cc-surface);white-space:nowrap}
+.b.primary{background:var(--cc-action);color:var(--cc-on-action);border-color:var(--cc-action);font-weight:700}
+.b.strong{border-color:var(--cc-text);font-weight:700}
+.b.big{padding:17px 30px;font-size:22px;border-radius:12px}
+.b.sm{padding:7px 12px;font-size:15px;border-radius:8px;border-width:1.5px}
+.b:disabled{background:var(--cc-surface-2);color:var(--cc-text-2);border-style:dashed;border-color:var(--cc-border-strong)}
+.link{background:none;border:none;padding:2px 0;text-decoration:underline;font-size:15px}
+.eyebrow{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--cc-text-2);font-weight:700}
+.muted{color:var(--cc-text-2)}
+.card{background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.attention{background:var(--cc-attention-bg);border:2px dashed var(--cc-attention);border-radius:12px;padding:12px 16px}
+.attention .eyebrow{color:var(--cc-attention)}
+.refusal{background:var(--cc-refusal-bg);border:3px dashed var(--cc-refusal);border-radius:12px}
+.proposed{border:2px solid var(--cc-proposed)}
+.tag{font-size:14px;font-weight:700;border:1.5px solid var(--cc-border-strong);padding:3px 10px;border-radius:5px;white-space:nowrap;align-self:flex-start}
+.tag.att{border-style:dashed;border-color:var(--cc-attention);background:var(--cc-attention-bg);color:var(--cc-attention)}
+.tag.now{background:var(--cc-current);color:var(--cc-on-current);border-color:var(--cc-current);text-transform:uppercase;letter-spacing:.06em}
+.tag.prop{background:var(--cc-proposed-bg);border-color:var(--cc-proposed);text-transform:uppercase;letter-spacing:.06em;font-size:13px}
+.tag.applied{background:var(--cc-applied-bg);color:var(--cc-applied);border-color:var(--cc-applied)}
+.tag.ref{border-color:var(--cc-refusal);text-transform:uppercase;letter-spacing:.06em;font-size:13px}
+.chip{font-size:19px;border:1.5px solid var(--cc-border-strong);border-radius:22px;padding:7px 15px;background:var(--cc-surface);white-space:nowrap}
+mark.ins{color:var(--cc-text);font-weight:700;background:var(--cc-proposed-bg);box-shadow:inset 0 -3px 0 var(--cc-proposed);padding:0 3px;border-radius:2px;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+strong.ins-applied{box-shadow:inset 0 -2px 0 var(--cc-applied)}
+.dots{display:inline-flex;gap:4px}.dots i{width:10px;height:10px;border-radius:5px;background:var(--cc-processing);animation:ccDot 1s infinite}.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
+.scroll{overflow:auto;min-height:0}
+dl{margin:0}dd{margin:0}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="./main.tsx"></script>
+</body>
+</html>

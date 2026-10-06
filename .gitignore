@@ -1,0 +1,191 @@
+# CourseCorrectMCP — default-deny ignore policy.
+#
+# Everything is ignored unless explicitly allowed below. To track a new file
+# type or path, add a narrow allow rule here in a reviewed change.
+# Rule order matters: later rules win. Hard denies come AFTER allows so they
+# override them, even beneath source directories.
+
+# ---------------------------------------------------------------------------
+# 1. Deny everything, then reopen directory traversal (dirs only, not files).
+# ---------------------------------------------------------------------------
+*
+!*/
+
+# ---------------------------------------------------------------------------
+# 2. Allowlist.
+# ---------------------------------------------------------------------------
+# Root submission files (exact names only).
+!/.gitignore
+!/README.md
+!/SETUP.md
+# /LICENSE: not allowed until an actual license decision exists.
+
+# Source and tests (TypeScript only).
+!/src/**/*.ts
+!/src/**/*.tsx
+!/tests/**/*.ts
+!/tests/**/*.tsx
+
+# Schemas.
+!/schemas/**/*.json
+
+# M1 (owner-authorized 2026-10-01): project config and approved engineering content.
+!/package.json
+!/package-lock.json
+!/tsconfig.json
+!/content/approved/**/*.json
+
+# M3 (companion build and browser checks): exact paths only.
+!/vite.config.ts
+!/vitest.config.ts
+!/playwright.config.ts
+!/playwright.live.config.ts
+!/src/web/index.html
+!/src/web/tsconfig.json
+
+# Not yet allowed — add by exact path when actually introduced:
+#   /public/assets/<deliberately chosen assets>  (place AFTER section 3)
+#   config templates, e.g. /config.example.json (reviewed, no real values)
+
+# ---------------------------------------------------------------------------
+# 3. Hard denies — apply at any depth and override the allowlist.
+# ---------------------------------------------------------------------------
+# Private docs and evidence.
+private/
+.artifacts/
+
+# Environment files.
+.env
+.env.*
+*.env
+
+# Credentials, keys, certificates, credential exports.
+credentials
+credentials.*
+*.credentials.*
+*credentials*.json
+*credentials*.csv
+*accessKeys*.csv
+*service-account*.json
+secrets/
+*secrets*.json
+*.secret
+*.pem
+*.key
+*.crt
+*.cer
+*.der
+*.csr
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.ppk
+*.kdbx
+id_rsa*
+id_ecdsa*
+id_ed25519*
+.aws/
+.npmrc
+.netrc
+
+# Local databases and SQLite sidecars.
+*.db
+*.db3
+*.sqlite
+*.sqlite3
+*-wal
+*-shm
+*-journal
+
+# Logs, recordings, screenshots, traces.
+*.log
+logs/
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.mp3
+*.m4a
+*.wav
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.heic
+*.har
+*.trace
+traces/
+test-results/
+playwright-report/
+screenshots/
+recordings/
+
+# Dependencies, coverage, caches, build output.
+node_modules/
+coverage/
+.nyc_output/
+dist/
+build/
+out/
+.cache/
+.vite/
+.turbo/
+.next/
+.parcel-cache/
+.eslintcache
+*.tsbuildinfo
+
+# Design exports, source downloads, uploaded documents.
+*.fig
+*.sketch
+*.xd
+*.psd
+*.ai
+*.svg
+*.pdf
+*.doc
+*.docx
+*.odt
+*.rtf
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.csv
+*.epub
+*.jsonl
+downloads/
+uploads/
+exports/
+
+# Backups, archives, scratch, OS/editor junk.
+*.bak
+*.orig
+*.rej
+*.swp
+*~
+*.tmp
+*.zip
+*.tar
+*.tgz
+*.gz
+*.7z
+*.rar
+*.bundle
+scratch/
+tmp/
+temp/
+*.scratch.*
+.DS_Store
+
+# Internal Markdown (anything beyond the exact root files re-allowed below).
+*.md
+
+# ---------------------------------------------------------------------------
+# 4. Exact re-allows that must survive section 3.
+# ---------------------------------------------------------------------------
+!/README.md
+!/SETUP.md

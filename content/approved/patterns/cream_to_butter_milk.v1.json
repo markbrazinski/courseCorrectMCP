@@ -1,0 +1,49 @@
+{
+  "schema": "cc-pattern/1", "kind": "RECOVERY", "patternId": "cream_to_butter_milk", "version": 1,
+  "title": "Butter and milk for cream in a dough",
+  "target": { "ingredientClass": "heavy-cream", "performsAll": ["FAT", "LIQUID"], "stepTechnique": "MIX_DOUGH" },
+  "slots": [{ "slot": "dry", "kind": "STEP_BEFORE_TARGET", "technique": "COMBINE_DRY" }],
+  "applicability": [],
+  "exceptions": [],
+  "evidence": { "quantityStatus": "PROVISIONAL", "basis": "Owner-directed demo ratio; OD-3 approved for engineering only (content-decisions.md)" },
+  "introduces": [
+    { "local": "butter", "kindId": "unsalted-butter", "name": "Butter" },
+    { "local": "milk", "kindId": "whole-milk", "name": "Milk" }
+  ],
+  "quantities": {
+    "butter": { "kind": "SCALE", "from": { "listedTotalOf": "$target" }, "sourceUnit": "ML", "factor": { "n": 17, "d": 60 }, "resultUnit": "G",
+      "inputDomain": [{ "n": 250, "d": 1 }, { "n": 350, "d": 1 }], "increment": { "n": 1, "d": 1 }, "maxAbsError": { "n": 1, "d": 2 },
+      "outputDomain": [{ "n": 71, "d": 1 }, { "n": 99, "d": 1 }] },
+    "milk": { "kind": "SCALE", "from": { "listedTotalOf": "$target" }, "sourceUnit": "ML", "factor": { "n": 3, "d": 5 }, "resultUnit": "ML",
+      "inputDomain": [{ "n": 250, "d": 1 }, { "n": 350, "d": 1 }], "increment": { "n": 1, "d": 1 }, "maxAbsError": { "n": 1, "d": 2 },
+      "outputDomain": [{ "n": 150, "d": 1 }, { "n": 210, "d": 1 }] },
+    "milk_extra": { "kind": "SCALE", "from": { "listedTotalOf": "$target" }, "sourceUnit": "ML", "factor": { "n": 1, "d": 10 }, "resultUnit": "ML",
+      "inputDomain": [{ "n": 250, "d": 1 }, { "n": 350, "d": 1 }], "increment": { "n": 1, "d": 1 }, "maxAbsError": { "n": 1, "d": 2 },
+      "outputDomain": [{ "n": 25, "d": 1 }, { "n": 35, "d": 1 }] }
+  },
+  "ops": [
+    { "op": "ADD_USE", "use": { "local": "butter_rub", "ingredient": { "introduce": "butter" }, "at": "$target.step", "qty": "butter", "prepNote": "cold", "functions": ["FAT"], "allowance": null }, "placement": "NONE" },
+    { "op": "REPLACE_USE", "use": "$target", "with": { "local": "milk_dough", "ingredient": { "introduce": "milk" }, "at": "$target.step", "qty": "milk", "prepNote": null, "functions": ["LIQUID"],
+      "allowance": { "maxQty": "milk_extra", "stopCondition": "Add it 1 tablespoon at a time and stop as soon as no dry flour remains.", "ifExhausted": "If the dough is still crumbly after that, press it together with your hands; don't add more liquid." } } },
+    { "op": "SET_STEP_TEXT", "step": "$target.step", "text": "Rub {use:butter_rub} into the dry mixture until it looks like coarse crumbs, then stir in {use:milk_dough} until a soft dough forms. {allowance:milk_dough}" },
+    { "op": "SET_RESUME", "step": "$target.step" }
+  ],
+  "siblingHandlers": [
+    { "match": { "performsAll": ["BROWNING"], "stepTechnique": "BRUSH" },
+      "replaceWith": { "local": "milk_brush", "ingredient": { "introduce": "milk" }, "qty": "CARRY_AS_WRITTEN", "prepNote": null, "functions": ["BROWNING"], "allowance": null } }
+  ],
+  "functionAccounting": [
+    { "from": "$target", "functionId": "FAT", "disposition": "MOVED", "to": "butter_rub" },
+    { "from": "$target", "functionId": "LIQUID", "disposition": "RETAINED", "to": "milk_dough" },
+    { "from": { "sibling": 0 }, "functionId": "BROWNING", "disposition": "RETAINED", "to": "milk_brush" }
+  ],
+  "introducedFunctions": [],
+  "consequence": {
+    "outcomeClass": "FUNCTION_MOVED", "equivalence": "NOT_EQUIVALENT",
+    "headline": "Rub in cold butter and use milk in the dough, and brush with milk instead of cream.",
+    "reason": "Cold butter supplies the fat the cream provided; milk supplies the liquid and replaces the cream for brushing.",
+    "tradeoff": "These become butter scones: the texture will be a little less rich and tender than cream scones."
+  },
+  "proposal": { "classes": ["butter", "milk"], "relation": "REALIZED_AS_PROPOSED", "text": "Yes, with a changed method." },
+  "guards": [{ "kind": "CURRENT_STEP_IS", "step": "$target.step" }]
+}

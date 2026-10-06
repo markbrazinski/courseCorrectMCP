@@ -1,0 +1,165 @@
+{
+  "schema": "cc-recipe-src/1",
+  "recipeId": "rcp_44097a23a6",
+  "title": "Cream Scones",
+  "meta": "Makes 8 · about 30 minutes",
+  "volumeSystem": "METRIC",
+  "source": {
+    "label": "Owner-authored engineering recipe (HF v1 fixture; step 6 titled for brushing)",
+    "rights": "OWNER_AUTHORED"
+  },
+  "decisionRef": "content-decisions.md#OD-3",
+  "ingredients": [
+    {
+      "id": "ing_eb626efbca",
+      "name": "Plain flour",
+      "kind": "plain-flour",
+      "listed": "300 g"
+    },
+    {
+      "id": "ing_abfb1fa318",
+      "name": "Caster sugar",
+      "kind": "white-sugar",
+      "listed": "40 g"
+    },
+    {
+      "id": "ing_ecdd9145f7",
+      "name": "Baking powder",
+      "kind": "baking-powder",
+      "listed": "1 tbsp"
+    },
+    {
+      "id": "ing_da68e1bab1",
+      "name": "Salt",
+      "kind": "salt",
+      "listed": "½ tsp"
+    },
+    {
+      "id": "ing_14ea95acad",
+      "name": "Heavy cream",
+      "kind": "heavy-cream",
+      "listed": "300 ML"
+    }
+  ],
+  "steps": [
+    {
+      "id": "stp_fc68bb9255",
+      "title": "Heat the oven",
+      "technique": "PREHEAT",
+      "text": "Heat the oven to 220 °C and line a tray."
+    },
+    {
+      "id": "stp_4e351eb9cf",
+      "title": "Mix the dry ingredients",
+      "technique": "COMBINE_DRY",
+      "text": "Whisk {use:use_ed12f383dc}, {use:use_8fe3ca33ce}, {use:use_9b4a31fedc} and {use:use_8113cf0ff2}."
+    },
+    {
+      "id": "stp_14c061c6c4",
+      "title": "Make the dough",
+      "technique": "MIX_DOUGH",
+      "text": "Stir in {use:use_4804a23ca1}, keeping back a little for brushing, until a soft dough forms."
+    },
+    {
+      "id": "stp_ebff9ea89a",
+      "title": "Cut the scones",
+      "technique": "SHAPE",
+      "text": "Pat to 2 cm thick and cut 8 rounds."
+    },
+    {
+      "id": "stp_47ff7f757f",
+      "title": "Tray them up",
+      "technique": "TRAY",
+      "text": "Place on the tray, spaced apart."
+    },
+    {
+      "id": "stp_0c8a98fb3b",
+      "title": "Brush the tops",
+      "technique": "BRUSH",
+      "text": "Brush the tops with {use:use_a036bdb8e3}."
+    },
+    {
+      "id": "stp_9bbfa0ee15",
+      "title": "Bake",
+      "technique": "BAKE",
+      "text": "Bake for 12–15 minutes, until golden.",
+      "duration": [
+        720,
+        "12 min · recipe says 12–15"
+      ]
+    }
+  ],
+  "uses": [
+    {
+      "id": "use_ed12f383dc",
+      "ingredient": "ing_eb626efbca",
+      "step": "stp_4e351eb9cf",
+      "amount": "300 g",
+      "display": "the flour",
+      "functions": [
+        "STRUCTURE"
+      ]
+    },
+    {
+      "id": "use_8fe3ca33ce",
+      "ingredient": "ing_abfb1fa318",
+      "step": "stp_4e351eb9cf",
+      "amount": "40 g",
+      "display": "sugar",
+      "functions": [
+        "SWEETNESS"
+      ]
+    },
+    {
+      "id": "use_9b4a31fedc",
+      "ingredient": "ing_ecdd9145f7",
+      "step": "stp_4e351eb9cf",
+      "amount": "1 tbsp",
+      "display": "baking powder",
+      "functions": [
+        "LEAVENING"
+      ]
+    },
+    {
+      "id": "use_8113cf0ff2",
+      "ingredient": "ing_da68e1bab1",
+      "step": "stp_4e351eb9cf",
+      "amount": "½ tsp",
+      "display": "salt",
+      "functions": [
+        {
+          "id": "FLAVOR",
+          "label": "seasoning"
+        }
+      ]
+    },
+    {
+      "id": "use_4804a23ca1",
+      "ingredient": "ing_14ea95acad",
+      "step": "stp_14c061c6c4",
+      "amount": {
+        "asWritten": "all but a little"
+      },
+      "display": "the cream",
+      "functions": [
+        "LIQUID",
+        "FAT"
+      ]
+    },
+    {
+      "id": "use_a036bdb8e3",
+      "ingredient": "ing_14ea95acad",
+      "step": "stp_0c8a98fb3b",
+      "amount": {
+        "asWritten": "a little"
+      },
+      "display": "a little cream",
+      "functions": [
+        {
+          "id": "BROWNING",
+          "label": "brushing"
+        }
+      ]
+    }
+  ]
+}
