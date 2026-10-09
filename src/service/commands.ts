@@ -21,7 +21,7 @@ export interface CatalogEntry { recipeId: Id; pack: RecipePack | null; release: 
 export interface ServiceOptions {
   dbPath: string; content: Content; interpreter: Interpreter; explainer?: Explainer; catalog?: () => CatalogEntry[];
   /** List the hand-authored approved recipes in the Recipe Book (test fixtures since the demo recipes come through import). */
-  fixtureRecipes?: boolean;
+  fixtureRecipes?: boolean | Set<Id>;   // true = all; a set = only those (the rest come in through import)
   kitchenId?: string; now?: () => string; newId?: (prefix: string) => string;
 }
 export type Rejected = { outcome: 'rejected'; code: string; message: string; run: WireRun | null; activeRun?: { runId: Id; recipeTitle: string } };
@@ -73,7 +73,8 @@ export class Service {
   private readonly now: () => string;
   private readonly newId: (prefix: string) => string;
   private readonly packs = new Map<string, RecipePack>();
-  private readonly fixtureRecipes: boolean;
+  private readonly fixtureRecipes: boolean | Set<Id>;
+  private listed(recipeId: Id) { return this.fixtureRecipes === true || (this.fixtureRecipes instanceof Set && this.fixtureRecipes.has(recipeId)); }
   catalog: () => CatalogEntry[];
 
   constructor(o: ServiceOptions) {
@@ -180,7 +181,7 @@ export class Service {
   private entries(): CatalogEntry[] {
     const archived = new Set(this.store.all<{ recipe_id: string }>('SELECT recipe_id FROM archived_recipes').map((r) => r.recipe_id));
     return [
-      ...[...this.content.packs.values()].filter(() => this.fixtureRecipes).map((p) => ({ recipeId: p.recipe.recipeId, pack: p as RecipePack | null, release: { kind: 'eligible' as const, coverageSummary: '' }, title: p.recipe.title, meta: p.recipe.meta, sourceLabel: p.recipe.source?.label ?? '' })),
+      ...[...this.content.packs.values()].filter((p) => this.listed(p.recipe.recipeId)).map((p) => ({ recipeId: p.recipe.recipeId, pack: p as RecipePack | null, release: { kind: 'eligible' as const, coverageSummary: '' }, title: p.recipe.title, meta: p.recipe.meta, sourceLabel: p.recipe.source?.label ?? '' })),
       ...this.catalog(),
     ].filter((e) => !archived.has(e.recipeId));
   }
@@ -203,9 +204,9 @@ export class Service {
 
   /** Approved content as a recipe page (GET /recipes/:id for recipes that are not imports). */
   approvedRecipe(recipeId: string) {
-    const p = this.fixtureRecipes ? this.content.packs.get(recipeId) : undefined;
+    const p = this.listed(recipeId) ? this.content.packs.get(recipeId) : undefined;
     if (!p) return null;
-    return { version: { id: p.recipeHash, recipeId, createdFromDraft: null, content: recipeContent(p.recipe, this.content.vocab, p, p.recipe, this.content.patterns), release: this.listRecipes().recipes.find((r) => r.recipeId === recipeId)!.release }, sources: [] };
+    return { version: { id: p.recipeHash, recipeId, createdFromDraft: null, content: recipeContent(p.recipe, this.content.vocab, p, p.recipe, this.content.patterns, { pending: false }), release: this.listRecipes().recipes.find((r) => r.recipeId === recipeId)!.release }, sources: [] };
   }
 
   // ---------- start_recipe (C-3: explicit, confirmed, atomic replacement) ----------
@@ -348,7 +349,7 @@ export class Service {
     if (!missing && input.utterance?.text) {
       const ctx = {
         ingredients: snap.recipe.ingredients.map((i) => ({ id: i.ingredientId, name: i.name })),
-        kinds: this.content.vocab.kinds.map((k) => ({ id: k.kindId, label: k.label, aliases: k.aliases })),
+        kinds: this.content.vocab.kinds.map((k) => ({ id: k.kindId, label: k.label, aliases: [...new Set([...k.aliases, k.short])] })),   // the short word is how a cook refers to it ("the cream"), not an identity
       };
       const out = await this.interpreter.interpret(input.utterance.text, ctx);
       interpretation = out.summary;
@@ -493,7 +494,7 @@ export class Service {
         draftId: draft.id, revision: draft.revision, title: content?.title ?? null, saved: false, blockers: draft.blockers.map((b) => b.message),
         steps: content?.steps.length ?? 0,
         uses: content?.ingredients.flatMap((i) => i.uses.map((u) => ({
-          ingredient: i.name, step: content.steps.find((s) => s.id === u.stepId)?.ordinal ?? null, swap: u.swap.kind, text: u.swap.text, label: u.swap.label ?? null,
+          ingredient: i.name, step: content.steps.find((s) => s.id === u.stepId)?.ordinal ?? null, swap: u.swap.kind, text: u.swap.text, label: u.swap.label ?? null, analysis: u.analysis?.status ?? null,
         }))) ?? [],
       },
       next: 'This is an unsaved draft. Review it and save it from the companion; importing never saves, reviews or releases a recipe.',
@@ -520,7 +521,8 @@ export class Service {
     });
   }
 
-  // ---------- admin reset (HTTP only; never an MCP tool) ----------
+  // ---------- test support: start a run at a named fixture scene (tests/support/server.ts and acceptance tests only; no
+  // product route reaches it, and it is never an MCP tool) ----------
   adminReset(fixtureId: string): { ok: true; runId: Id; epoch: number; stateHash: string } | { ok: false; code: string } {
     const fx = this.content.fixtures.get(fixtureId);
     if (!fx) return { ok: false, code: 'FIXTURE_NOT_FOUND' };
@@ -543,27 +545,19 @@ export class Service {
   }
 
   /**
-   * Demo/practice reset (owner key; HTTP only, never MCP). Archives the whole database first, then clears cooking
-   * sessions, proposals, receipts and Activity (and, if asked, imported recipes, except the demo recipes listed in
-   * demo_recipes, which stay in the Recipe Book). Kitchen epoch +1, so a stale tab's commands are refused. Approved
-   * content is untouched.
+   * Start over (owner key; HTTP only, never MCP). Archives the whole database first, then clears cooking sessions, proposals,
+   * receipts, Activity and every imported recipe. Kitchen epoch +1, so a stale tab's commands are refused. Approved content
+   * (the owner-authored example recipes) is untouched and stays listed; nothing is restored or replayed.
    */
-  demoReset(archivePath: string, removeImports: boolean) {
+  startOver(archivePath: string) {
     this.store.db.exec(`VACUUM INTO '${archivePath.replace(/'/g, "''")}'`);   // evidence copy before anything is cleared
     this.store.tx(() => {
-      for (const t of ['activity', 'receipts', 'amendments', 'evaluations', 'progress_events', 'run_versions', 'runs']) this.store.run(`DELETE FROM ${t}`);
-      if (removeImports) {
-        const demo = 'SELECT draft_id FROM saved_recipes WHERE recipe_id IN (SELECT recipe_id FROM demo_recipes)';
-        for (const t of ['facts', 'extractions', 'swap_analyses', 'draft_bodies', 'draft_sources', 'import_jobs', 'drafts']) this.store.run(`DELETE FROM ${t} WHERE draft_id NOT IN (${demo})`);
-        this.store.run('DELETE FROM saved_recipes WHERE recipe_id NOT IN (SELECT recipe_id FROM demo_recipes)');
-        this.store.run('DELETE FROM sources WHERE source_id NOT IN (SELECT source_id FROM draft_sources)');
-        const keep = [...this.content.packs.values()].map((p) => p.packHash);
-        this.store.run(`DELETE FROM packs WHERE pack_hash NOT IN (${keep.map(() => '?').join(',')}) AND pack_hash NOT IN (SELECT pack_hash FROM saved_recipes)`, ...keep);
-      }
-      this.store.run(`DELETE FROM sqlite_sequence WHERE name = 'activity'`);   // Activity numbering restarts at #1
+      for (const t of ['activity', 'receipts', 'amendments', 'evaluations', 'progress_events', 'run_versions', 'runs', 'facts', 'extractions', 'swap_analyses', 'swap_repairs', 'draft_bodies', 'draft_sources', 'import_jobs', 'drafts', 'saved_recipes', 'archived_recipes', 'sources']) this.store.run(`DELETE FROM ${t}`);
+      const keep = [...this.content.packs.values()].map((p) => p.packHash);
+      this.store.run(`DELETE FROM packs WHERE pack_hash NOT IN (${keep.map(() => '?').join(',')})`, ...keep);
       this.store.run('UPDATE kitchens SET epoch = epoch + 1 WHERE kitchen_id = ?', this.kitchenId);
     });
-    return { ok: true as const, archivedTo: archivePath, removedImports: removeImports };
+    return { ok: true as const, archivedTo: archivePath };
   }
 
   // ---------- activity (real MCP calls, server-recorded) ----------

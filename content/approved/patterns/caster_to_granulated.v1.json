@@ -1,0 +1,134 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "RECOVERY",
+  "patternId": "caster_to_granulated",
+  "version": 1,
+  "title": "Granulated sugar for caster sugar in a dry mix",
+  "target": {
+    "ingredientClass": "caster-sugar",
+    "performsAll": [
+      "SWEETNESS"
+    ],
+    "stepTechnique": "COMBINE_DRY"
+  },
+  "slots": [
+    {
+      "slot": "mix",
+      "kind": "STEP_AFTER_TARGET",
+      "technique": "MIX_DOUGH"
+    },
+    {
+      "slot": "bake",
+      "kind": "STEP_AFTER_TARGET",
+      "technique": "BAKE"
+    }
+  ],
+  "applicability": [],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "SOURCED",
+    "basis": "B6. OD-7 (owner commission 2026-10-08, ENGINEERING only; not culinary validation, not released guidance). Evidence: private/research/substitution-knowledge (2026-10-07). Amount: KA SRC-SU-01#f ('Granulated sugar can be used in place of superfine sugar/caster sugar by weight'). Identity: KA SRC-SU-01#c (caster is granulated ground finer); UK law SRC-SU-27#a defines white sugar by purity, not grain size. Scope enforced: the sugar's only use (listed-total base), a dry mix that is then mixed into a dough (MIX_DOUGH) and baked, amount in grams. Grain-size consequence: Nigella.com SRC-SU-15#b/#c (UK granulated coarser), SRC-SU-16#a (undissolved crystals in creamed cakes; analogy). No source tests scones or biscuits."
+  },
+  "introduces": [
+    {
+      "local": "gran",
+      "kindId": "white-sugar",
+      "name": "Granulated sugar"
+    }
+  ],
+  "quantities": {
+    "gran": {
+      "kind": "SCALE",
+      "from": {
+        "listedTotalOf": "$target"
+      },
+      "sourceUnit": "G",
+      "factor": {
+        "n": 1,
+        "d": 1
+      },
+      "resultUnit": "G",
+      "inputDomain": [
+        {
+          "n": 5,
+          "d": 1
+        },
+        {
+          "n": 500,
+          "d": 1
+        }
+      ],
+      "increment": {
+        "n": 1,
+        "d": 1
+      },
+      "maxAbsError": {
+        "n": 1,
+        "d": 2
+      },
+      "outputDomain": [
+        {
+          "n": 5,
+          "d": 1
+        },
+        {
+          "n": 500,
+          "d": 1
+        }
+      ]
+    }
+  },
+  "ops": [
+    {
+      "op": "REPLACE_USE",
+      "use": "$target",
+      "with": {
+        "local": "gran_use",
+        "ingredient": {
+          "introduce": "gran"
+        },
+        "at": "$target.step",
+        "qty": "gran",
+        "prepNote": null,
+        "functions": [
+          "SWEETNESS"
+        ],
+        "allowance": null
+      }
+    },
+    {
+      "op": "SET_RESUME",
+      "step": "$target.step"
+    }
+  ],
+  "siblingHandlers": [],
+  "functionAccounting": [
+    {
+      "from": "$target",
+      "functionId": "SWEETNESS",
+      "disposition": "RETAINED",
+      "to": "gran_use"
+    }
+  ],
+  "introducedFunctions": [],
+  "consequence": {
+    "outcomeClass": "SUBSTITUTED",
+    "equivalence": "NOT_EQUIVALENT",
+    "headline": "Use the same weight of granulated sugar instead of the caster sugar.",
+    "reason": "Caster sugar is granulated sugar ground finer, so the same weight sweetens the same.",
+    "tradeoff": "Granulated crystals are coarser and may not all dissolve, so the texture can be slightly grainier or speckled; UK granulated sugar is coarser still."
+  },
+  "proposal": {
+    "classes": [
+      "sugar"
+    ],
+    "relation": "REALIZED_AS_PROPOSED",
+    "text": "Yes, the same weight of granulated sugar."
+  },
+  "guards": [
+    {
+      "kind": "CURRENT_STEP_IS",
+      "step": "$target.step"
+    }
+  ]
+}

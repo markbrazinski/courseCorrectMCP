@@ -1,6 +1,8 @@
 // Connected journeys through the real companion, real MCP tools and the real engine (RECORDED interpretation; replayed
 // M2 extraction readings). Admin reset is used only to make "another session is active" true at the start of a test;
 // everything a cook does goes through the product's own controls.
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { LEMON_PAGE1, LEMON_PASTED, RISOTTO_LINES, SCONE_LINES, SHORTCAKE_LINES } from '../fixtures/demo-sources.ts';
 import { makePdf, scanImage } from '../fixtures/pdf.ts';
@@ -117,8 +119,9 @@ test('Shortcake refusal: not supported for whipping, recipe unchanged, no Apply'
   await expect(scr(page).getByText('✕ Not supported for this use')).toBeVisible();
   await expect(scr(page).getByText('✕ No reviewed change for this use')).toBeVisible();
   await expect(page.getByTestId('refusal-answer')).toHaveText(/^No\. /);                          // the decision, in words
-  await expect(page.getByTestId('refusal-reason')).toContainText('milk and butter can\'t whip');   // the engine's reasons
+  // the authored reason, said once (2026-10-08): no second sentence restating that milk and butter can't whip
   await expect(page.getByTestId('refusal-reason')).toContainText('This catalog doesn\'t accept milk and butter in place of cream that has to be whipped');
+  await expect(page.getByTestId('refusal-reason')).not.toContainText('milk and butter can\'t whip');
   await expect(scr(page).getByText(/Step 6 still needs 240 ML heavy cream/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Use this change', exact: true })).toHaveCount(0);
   await expect(scr(page).getByText(/Already done/).first()).toBeVisible();
@@ -135,8 +138,8 @@ test('Shortcake step 4: "No", because the same cream must whip in step 6 (reason
   await say(page, 'I’m out of heavy cream. Can I use milk and butter?');
   await expect(page.getByTestId('refusal-answer')).toHaveText(/^No\. /);
   const why = page.getByTestId('refusal-reason');
-  await expect(why).toContainText(/step 6 \(whipped topping\)/);
-  await expect(why).toContainText('milk and butter can\'t whip');
+  await expect(why).toContainText(/In step 6 \(Whip the cream\) the cream is used to whip \(whipped topping\); milk and butter can't whip/);   // step 6 explained once, by its own refusal
+  await expect(why).not.toContainText(/also used in step 6|this reading has no recognized/);
   await expect(why).toContainText(/In step 4 .*milk and butter can do that job/);
   await expect(scr(page).getByText('Milk and butter: step 4: would work on its own, step 6: no')).toBeVisible();
   await expect(scr(page).getByText(/no change has been reviewed for this use/)).toHaveCount(0);   // a rule was reviewed; it can't cover step 6
@@ -270,24 +273,25 @@ test('A-1 PDF import → swap plan shown at reading (no confirmations, no owner 
   await page.getByRole('button', { name: 'Add a recipe' }).click();
   await page.getByLabel('Choose a recipe PDF').setInputFiles(pdf('scones.pdf', [{ lines: SCONE_LINES }]));
   await page.getByRole('button', { name: 'Upload and read' }).click();
+  await expect(page.getByRole('heading', { name: 'Reading scones.pdf' })).toBeVisible();
+  await page.getByRole('button', { name: 'Skip to results' }).click({ timeout: 3000 }).catch(() => undefined);
   await expect(scr(page).getByText('How scones.pdf was read')).toBeVisible();
-  await expect(page.getByRole('complementary', { name: 'Activity' }).getByText('Import · web requests, not MCP')).toBeVisible();
-  await page.getByRole('button', { name: 'Skip the animation' }).click({ timeout: 3000 }).catch(() => undefined);
-  await expect(scr(page).getByText('✓ Swaps worked out')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Activity' })).toContainText(/1 web request · \d+ MCP call/);   // upload is web; import_recipe is MCP
   await expect(page.getByRole('region', { name: 'If you run out' })).toHaveCount(0);   // owner: no summary panel
-  await expect(scr(page).getByText(/Heavy cream is used in more than one step: step 3 \(liquid · fat\), step 6 \(browning\)/i)).toBeVisible();
-  await expect(scr(page).getByText('◆ swap ready')).toHaveCount(1);
+  await expect(page.getByTestId('analysis-summary')).toHaveText('● 4 Alternative available◐ 1 Omission available○ 1 No alternative found');   // batch 1: reviewed caster sugar and baking powder plans
+  await expect(page.getByRole('button', { name: /^heavy cream, step (3|6): Alternative available/i })).toHaveCount(2);   // one row, two uses
   await page.getByRole('button', { name: /heavy cream, step 3/i }).click();
-  await expect(page.getByTestId('swap')).toHaveText('If you run out: Butter and milk for cream in a dough');
-  await expect(scr(page).getByText('Step 3: 85 g cold butter')).toBeVisible();                      // calculated amounts on the selected use
-  await expect(scr(page).getByText('liquid · aeration · not used')).toBeVisible();   // the import's wrong guess, shown, never used
+  await expect(page.getByTestId('swap')).toHaveText('Butter and milk for cream in a dough');
+  await expect(page.getByTestId('swap-label')).toHaveText('Reviewed change');
+  await expect(page.getByTestId('replacement').filter({ hasText: 'Butter' })).toContainText('85 g');   // calculated amounts on the selected use
+  await expect(page.getByTestId('replacement').filter({ hasText: 'Prep: cold' })).toHaveCount(1);
   await page.waitForTimeout(600);
   await page.screenshot({ path: '.artifacts/e2e/shots/import-canvas.png' });
   await expect(page.getByRole('button', { name: /owner review/i })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Answer', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: /Save to Recipe Book|Save changes as a new version/ }).click();
   await expect(scr(page).getByText('Saved to your Recipe Book. You can start cooking.')).toBeVisible();
-  await expect(scr(page).getByText('Reviewed change on file: heavy cream, step 3')).toBeVisible();
+  await expect(scr(page).getByText('Reviewed change on file: caster sugar, step 2; heavy cream, step 3; baking powder, step 2')).toBeVisible();
   await page.screenshot({ path: '.artifacts/e2e/shots/import-recipe-page.png', fullPage: true });
   await page.getByRole('button', { name: 'Start cooking' }).click();
   await page.getByRole('button', { name: /^End it and start/ }).click();
@@ -311,8 +315,8 @@ async function importDemo(page: Page, name: string, lines: string[]) {
   await page.getByRole('button', { name: 'Add a recipe' }).click();
   await page.getByLabel('Choose a recipe PDF').setInputFiles(pdf(`${name}.pdf`, [{ lines }]));
   await page.getByRole('button', { name: 'Upload and read' }).click();
-  await page.getByRole('button', { name: 'Skip the animation' }).click({ timeout: 3000 }).catch(() => undefined);
-  await expect(scr(page).getByText('✓ Swaps worked out')).toBeVisible();
+  await page.getByRole('button', { name: 'Skip to results' }).click({ timeout: 3000 }).catch(() => undefined);
+  await expect(page.getByTestId('analysis-summary')).toBeVisible();
 }
 async function saveAndStart(page: Page) {
   await page.getByRole('button', { name: /Save to Recipe Book|Save changes as a new version/ }).click();
@@ -326,19 +330,19 @@ async function saveAndStart(page: Page) {
 test('Import cards: every use of the shortcake has an answer, labelled AI; a "no" says why (canvas and cooking)', async ({ page }) => {
   await reset(page, 'risotto.step5');
   await importDemo(page, 'shortcake', SHORTCAKE_LINES);
-  await expect(scr(page).getByText('◇ swap (AI)')).toHaveCount(3);                                // salt, sugar (step 6), strawberries
   await page.getByRole('button', { name: /strawberries, step 7/i }).click();
-  await expect(page.getByTestId('swap')).toHaveText('If you run out: Raspberries for the strawberries');
+  await expect(page.getByTestId('swap')).toHaveText('Raspberries for the strawberries');
   await expect(page.getByTestId('swap-label')).toHaveText('Prepared at import (AI)');
   await expect(page.getByTestId('swap-opinion')).toHaveText('“Fill the shortcakes with 500 g raspberries instead of the strawberries.”');
-  await expect(scr(page).getByText('Step 7: 500 g raspberries')).toBeVisible();
+  await expect(page.getByTestId('replacement')).toHaveText(/Raspberries\s*500 g\s*Step 7/);
   await page.waitForTimeout(600);
   await page.screenshot({ path: '.artifacts/e2e/shots/import-card-selected.png' });
+  await page.getByRole('button', { name: '← Recipe matrix' }).click();
   await page.getByRole('button', { name: /heavy cream, step 4/i }).click();
-  await expect(page.getByTestId('swap')).toHaveText("No for now: The cream is also whipped in step 6, and milk and butter can't be whipped.");
-  await page.getByRole('button', { name: /baking powder, step 2/i }).click();
+  await expect(page.getByTestId('swap')).toHaveText("The cream is also whipped in step 6, and milk and butter can't be whipped.");
+  await page.getByRole('button', { name: /baking powder, step 2/i }).click();   // the compact matrix stays beside the detail
   await expect(page.getByTestId('swap')).toHaveText('No, because the baking powder makes the shortcakes rise; without it they bake flat and dense.');
-  await expect(page.getByTestId('swap-label')).toHaveText('Prepared at import (AI)');
+  await expect(page.getByTestId('swap-label')).toHaveText('Prepared at import (AI) · not reviewed');
   await page.waitForTimeout(600);
   await page.screenshot({ path: '.artifacts/e2e/shots/import-card-no.png' });
   await saveAndStart(page);
@@ -357,7 +361,7 @@ test('Import cards: the imported risotto\'s Parmesan card is a labelled plan →
   await reset(page, 'shortcake.step6');
   await importDemo(page, 'risotto', RISOTTO_LINES);
   await page.getByRole('button', { name: /dry white wine, step 5/i }).click();
-  await expect(page.getByTestId('swap')).toHaveText('If you run out: Split the wine\'s jobs');
+  await expect(page.getByTestId('swap')).toHaveText('Split the wine\'s jobs');
   await expect(page.getByTestId('swap-label')).toHaveText('Reviewed change');                 // the reviewed rule is the cross-check
   await saveAndStart(page);
   await doneThrough(page, 6);
@@ -375,13 +379,17 @@ test('Import cards: the imported risotto\'s Parmesan card is a labelled plan →
 });
 
 test('A-2 lemon partial read → saved, can’t start → paste the missing steps → can start', async ({ page }) => {
+  // evidence-dependent: the lemon readings exist only in the retained M2 live probe output (git-ignored), not in the fixtures
+  test.skip(!existsSync(join(import.meta.dirname, '../../.artifacts/probes/m2-replay.json')), 'EVIDENCE-DEPENDENT: needs .artifacts/probes/m2-replay.json (retained M2 probe readings)');
   await page.goto('/');
   await page.getByRole('button', { name: 'Add a recipe' }).click();
   await page.getByLabel('Choose a recipe PDF').setInputFiles(pdf('lemon-cake.pdf', [{ lines: LEMON_PAGE1 }, { image: scanImage() }]));
   await page.getByRole('button', { name: 'Upload and read' }).click();
-  await page.getByRole('button', { name: 'Skip the animation' }).click({ timeout: 3000 }).catch(() => undefined);
+  await page.getByRole('button', { name: 'Skip to results' }).click({ timeout: 3000 }).catch(() => undefined);
   await expect(scr(page).getByText('Next · incomplete reading')).toBeVisible();
-  await expect(scr(page).getByText(/Page 2 · scanned image · not read/)).toBeVisible();
+  await page.getByRole('button', { name: 'View source' }).first().click();
+  await expect(page.getByRole('dialog', { name: 'Source' }).getByText(/Page 2 · scanned image · not read/)).toBeVisible();
+  await page.getByRole('dialog', { name: 'Source' }).getByRole('button', { name: 'Close' }).click();
   await page.getByRole('button', { name: 'Save to Recipe Book' }).click();
   await expect(scr(page).getByText('Saved to your Recipe Book. It can’t start yet.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Start cooking' })).toBeDisabled();
@@ -500,21 +508,20 @@ test('A natural reply answers the open question instead of starting a new reques
   expect((await mcp(page, 'get_active_recipe')).run.appliedAmendments).toHaveLength(0);
 });
 
-test('Activity starts blank for each recipe; ⌥⇧R resets the demo (sessions, imports and Activity cleared, data archived)', async ({ page }) => {
+test('Activity starts blank for each recipe; start over (owner key) clears sessions and imports, keeps the examples', async ({ page }) => {
   await reset(page, 'shortcake.step6');
   await start(page, /Risotto with Parmesan/);
   const act = page.getByRole('complementary', { name: 'Activity' });
   await expect(act.getByTestId('activity-entry').last()).toContainText('start_recipe');               // nothing from before this recipe
   await expect(act.getByTestId('activity-entry').filter({ hasText: 'record_progress' })).toHaveCount(0);   // the previous session's progress is hidden
   await page.getByRole('button', { name: 'Done', exact: true }).click();
-  await page.keyboard.press('Alt+Shift+KeyR');
-  const dialog = page.getByRole('dialog', { name: 'Reset demo' });
-  await dialog.getByRole('button', { name: 'Reset' }).click();                                       // no key needed on a practice server
+  expect((await page.request.post('/admin/start-over')).status()).toBe(401);                          // owner key required
+  expect((await page.request.post('/admin/start-over', { headers: { authorization: 'Bearer e2e-owner-key' } })).status()).toBe(200);
+  await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Recipe Book' })).toBeVisible();
-  await expect(act.getByText('No MCP calls yet.')).toBeVisible();
   await expect(page.getByRole('button', { name: /Resume cooking/ })).toHaveCount(0);                 // no active session
   expect((await mcp(page, 'get_active_recipe')).run).toBeNull();
-  expect((await mcp(page, 'list_recipes')).recipes).toHaveLength(3);                                  // imports removed; demo recipes stay
+  expect((await mcp(page, 'list_recipes')).recipes).toHaveLength(3);                                  // imports removed; the owner-authored examples stay
 });
 
 test('Scone by spoken-style replies: a plain yes answers one question and prompts the next; "yes to both" answers all; "let’s use this change" applies', async ({ page }) => {
@@ -538,4 +545,25 @@ test('Scone by spoken-style replies: a plain yes answers one question and prompt
   await expect(page.getByTestId('question')).toHaveCount(2);   // answer the open questions, not a new request
   await say(page, 'yes to both');
   await expect(page.getByTestId('consequence')).toBeVisible();
+});
+
+test('Import and archive are MCP actions: upload → import_recipe → save → Remove from Recipe Book → delete_recipe (history kept)', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Add a recipe' }).first().click();
+  await page.getByLabel('Choose a recipe PDF').setInputFiles(pdf('scones.pdf', [{ lines: SCONE_LINES }]));
+  await page.getByRole('button', { name: 'Upload and read' }).click();
+  await page.getByRole('button', { name: 'Skip to results' }).click({ timeout: 3000 }).catch(() => undefined);
+  await expect(scr(page).getByText('How scones.pdf was read')).toBeVisible();
+  const act = page.getByRole('region', { name: 'Activity' });
+  await act.getByRole('button', { name: /Show history/ }).click();
+  await expect(act.getByTestId('activity-entry').filter({ hasText: 'import_recipe' })).toHaveCount(1);   // a real MCP call, server-recorded
+  await page.getByRole('button', { name: /Save to Recipe Book|Save changes as a new version/ }).click();
+  await expect(scr(page).getByText(/Saved to your Recipe Book/)).toBeVisible();
+  const before = (await mcp(page, 'list_recipes')).recipes.length;
+  await page.getByRole('button', { name: 'Remove from Recipe Book' }).click();
+  await page.getByRole('group', { name: 'Remove from Recipe Book' }).getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Recipe Book' })).toBeVisible();
+  expect((await mcp(page, 'list_recipes')).recipes.length).toBe(before - 1);
+  const calls = (await (await page.request.get('/activity')).json()).entries as { name: string; status: string }[];
+  expect(calls.filter((c) => c.name === 'delete_recipe' && c.status === 'ok')).toHaveLength(1);
 });

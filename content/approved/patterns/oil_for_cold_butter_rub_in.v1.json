@@ -1,0 +1,32 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "REFUSAL",
+  "patternId": "oil_for_cold_butter_rub_in",
+  "version": 1,
+  "title": "Oil for cold butter that's rubbed in",
+  "target": {
+    "ingredientClass": "butter",
+    "performsAll": [
+      "FAT"
+    ],
+    "stepTechnique": "RUB_IN"
+  },
+  "slots": [],
+  "applicability": [],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "NONE",
+    "basis": "B4. OD-7 (owner commission 2026-10-08, ENGINEERING only; not culinary validation, not released guidance). Evidence: private/research/substitution-knowledge (2026-10-07). Milk Street SRC-BO-41#a (oil a poor substitute where cold butter is cut in: sodden dough); Utah State SRC-BO-34#a; Purdue SRC-BO-40#g; New Mexico State SRC-BO-37#c; KA SRC-BO-14#b (warm fat: dense, leaden biscuits). Recipes written for oil are not a substitution case."
+  },
+  "proposal": {
+    "classes": [
+      "cooking-oil"
+    ],
+    "match": "EQUALS"
+  },
+  "response": "NOT_FUNCTIONALLY_EQUIVALENT",
+  "requiredFunctionLabel": "fat",
+  "text": "Oil can't stand in for the cold butter rubbed into this dough: the butter has to stay in solid pieces that melt in the oven, and liquid oil soaks into the flour instead, giving a sodden, dense dough.",
+  "scopeNote": "This is about oil in place of cold butter that's rubbed in; recipes written for oil are different. It isn't a verdict on other replacements.",
+  "answer": "can't be rubbed in as solid pieces"
+}

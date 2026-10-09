@@ -32,12 +32,12 @@ export async function call<T>(name: string, args: Record<string, unknown> = {}):
 }
 
 // ---------- web requests (logged as 'web') ----------
-export interface WebEntry { seq: number; name: string; input: string; result: string }
+export interface WebEntry { seq: number; name: string; input: string; result: string; at: string }
 const webLog: WebEntry[] = [];
 const listeners = new Set<() => void>();
 export const onWebLog = (f: () => void) => { listeners.add(f); return () => { listeners.delete(f); }; };
 export const webEntries = () => webLog;
-function logWeb(name: string, input: string, result: string) { webLog.unshift({ seq: webLog.length + 1, name, input, result }); listeners.forEach((f) => f()); }
+function logWeb(name: string, input: string, result: string) { webLog.unshift({ seq: webLog.length + 1, name, input, result, at: new Date().toISOString() }); listeners.forEach((f) => f()); }
 
 export async function web<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}, label?: string): Promise<{ status: number; data: T }> {
   const isFile = body instanceof Blob;

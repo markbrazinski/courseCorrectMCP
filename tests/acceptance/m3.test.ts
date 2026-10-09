@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { BudgetExceeded, Ledger, type Authorization } from '../../src/authoring/nova.ts';
-import { recordedInterpreter } from '../../src/service/interpret.ts';
+import { onlyNamed, recordedInterpreter } from '../../src/service/interpret.ts';
 import { cmd, newService, startAt } from '../helpers.ts';
 import { ING, RECIPE } from '../fixtures/ids.ts';
 
@@ -104,9 +104,21 @@ describe('timer voice commands', () => {
 describe('explicit acceptance and multi-question answers', () => {
   it('natural acceptance phrasings accept; negations and bare yes never do; "both/all" covers every open question', async () => {
     const { route, answersAll } = await import('../../src/web/route.ts');
-    for (const t of ["let's use this change", 'Use this change.', 'apply the change', 'ok use the change please', 'accept this change']) expect(route(t).kind, t).toBe('accept');
-    for (const t of ["don't use this change", 'do not apply the change', 'no, not this change', 'yes', 'yes I have it', 'sure']) expect(route(t).kind, t).not.toBe('accept');
+    for (const t of ["let's use this change", 'Use this change.', 'apply the change', 'ok use the change please', 'accept this change',
+      'used this change', 'use this chain', 'use the changes', 'use change']) expect(route(t).kind, t).toBe('accept');   // how recognition hears the short command
+    for (const t of ["don't use this change", 'do not apply the change', 'no, not this change', "don't use the changes", 'yes', 'yes I have it', 'sure', 'what changed', 'change of plan']) expect(route(t).kind, t).not.toBe('accept');
     for (const t of ['yes to both', 'I have everything', 'yes, all of them']) expect(answersAll(t), t).toBe(true);
     for (const t of ['yes', 'yes I have it', 'yeah']) expect(answersAll(t), t).toBe(false);
+  });
+});
+
+describe('an open question proposes nothing the cook didn’t name (live finding 2026-10-08)', () => {
+  const ctx = { ingredients: [{ id: 'ing_c', name: 'heavy cream' }], kinds: [
+    { id: 'whole-milk', label: 'whole milk', aliases: ['milk'] }, { id: 'half-and-half-cream', label: 'half-and-half', aliases: [] }, { id: 'unsalted-butter', label: 'unsalted butter', aliases: ['butter'] }] };
+  const intent = { missingIngredientId: 'ing_c', proposedKindIds: ['whole-milk', 'half-and-half-cream', 'unsalted-butter'], statesAmount: false, progressClaim: null, unmappedProposalText: null };
+  it('drops the model’s own ideas; keeps what was named; leaves a proposal alone', () => {
+    expect(onlyNamed(intent, 'I am out of cream, what do I use in place?', ctx).proposedKindIds).toEqual([]);
+    expect(onlyNamed(intent, 'What can I use instead, milk?', ctx).proposedKindIds).toEqual(['whole-milk']);
+    expect(onlyNamed(intent, 'I’m out of cream. Can I use milk and butter?', ctx).proposedKindIds).toEqual(intent.proposedKindIds);   // not an open question
   });
 });

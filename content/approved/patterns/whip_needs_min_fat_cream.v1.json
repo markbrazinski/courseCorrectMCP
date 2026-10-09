@@ -1,0 +1,32 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "REFUSAL",
+  "patternId": "whip_needs_min_fat_cream",
+  "version": 1,
+  "title": "Half-and-half or light cream for cream that must whip",
+  "target": {
+    "ingredientClass": "heavy-cream",
+    "performsAll": [
+      "AERATION"
+    ],
+    "stepTechnique": "WHIP"
+  },
+  "slots": [],
+  "applicability": [],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "NONE",
+    "basis": "B3. OD-7 (owner commission 2026-10-08, ENGINEERING only; not culinary validation, not released guidance). Evidence: private/research/substitution-knowledge (2026-10-07). ATK SRC-CM-16#a (at least 30 percent milk fat to whip); KA SRC-CM-19#a; legal ranges 21 CFR 131.180 half-and-half 10.5-<18% (SRC-CM-04#a), 131.155 light cream 18-<30% (SRC-CM-03#a); Canadian light cream (5-6%) is also below 30%. UK single cream is NOT included: its 18% is only a minimum."
+  },
+  "proposal": {
+    "classes": [
+      "cream-below-whipping-fat"
+    ],
+    "match": "EQUALS"
+  },
+  "response": "NOT_FUNCTIONALLY_EQUIVALENT",
+  "requiredFunctionLabel": "whipped topping",
+  "text": "This catalog doesn't accept half-and-half or light cream in place of cream that has to be whipped: cream needs at least 30 percent fat to hold air, and these have less.",
+  "scopeNote": "This is about these thinner creams for whipping only. Light whipping cream (30 percent fat or more) isn't covered by this answer.",
+  "answer": "has too little fat to whip"
+}

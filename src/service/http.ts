@@ -1,6 +1,6 @@
-// One HTTP listener: /mcp (Streamable HTTP, stateless), /admin/reset (bearer), /activity, /health, /speech,
-// import/draft routes, and the built companion (static files) at /.
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+// One HTTP listener: /mcp (Streamable HTTP, stateless), /activity, /health, /speech, import/draft routes, owner routes
+// (/authoring/*, /admin/start-over; bearer CC_OWNER_TOKEN), and the built companion (static files) at /.
+import { createServer, type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
@@ -10,7 +10,7 @@ import type { Service } from './commands.ts';
 import { buildMcp } from './mcp.ts';
 import type { Speaker } from './speech.ts';
 
-export interface HttpOptions { port: number; adminToken: string | null; ownerToken?: string | null; host?: string; authoring?: Authoring; speaker?: Speaker | null; webRoot?: string; archiveDir?: string; demo?: boolean }
+export interface HttpOptions { port: number; ownerToken?: string | null; host?: string; authoring?: Authoring; speaker?: Speaker | null; webRoot?: string; archiveDir?: string }
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.map': 'application/json', '.woff2': 'font/woff2', '.ico': 'image/x-icon' };
 
 const raw = (req: IncomingMessage, limit = 11 * 1024 * 1024) => new Promise<Buffer>((resolve, reject) => {
@@ -29,14 +29,21 @@ const json = (res: ServerResponse, status: number, v: unknown) => res.writeHead(
 const sameSecret = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 export function startHttp(svc: Service, o: HttpOptions): Promise<Server> {
+  const server = createServer(handler(svc, o));
+  return new Promise((resolve) => server.listen(o.port, o.host ?? '127.0.0.1', () => resolve(server)));
+}
+
+/** The request handler on its own, so a test server can serve its own routes beside it (tests/support/server.ts). */
+export function handler(svc: Service, o: HttpOptions): RequestListener {
   const host = o.host ?? '127.0.0.1';
-  const server = createServer(async (req, res) => {
+  const owner = (req: IncomingMessage) => !!o.ownerToken && sameSecret(req.headers.authorization ?? '', `Bearer ${o.ownerToken}`);
+  return async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', `http://${host}`);
       const origin = req.headers.origin;
       const allowed = [`http://127.0.0.1:${o.port}`, `http://localhost:${o.port}`];
       if (origin && !allowed.includes(origin)) return json(res, 403, { error: `Invalid Origin: ${origin}` });   // DNS-rebinding defence
-      if (url.pathname === '/health') return json(res, 200, { ok: true, interpreter: svc.interpreter.mode, speech: o.speaker ? 'polly' : 'off', demo: !!o.demo });
+      if (url.pathname === '/health') return json(res, 200, { ok: true, interpreter: svc.interpreter.mode, speech: o.speaker ? 'polly' : 'off' });
       if (url.pathname === '/speech' && req.method === 'POST') {
         if (!o.speaker) return json(res, 503, { error: { code: 'SPEECH_OFF', message: 'Spoken replies are off on this server.' } });
         const text = svc.speechText(((await body(req)) ?? {}) as Parameters<Service['speechText']>[0]);
@@ -48,22 +55,16 @@ export function startHttp(svc: Service, o: HttpOptions): Promise<Server> {
       if (url.pathname === '/activity' && req.method === 'GET') {
         return json(res, 200, { entries: svc.activity(url.searchParams.get('runId') ?? undefined, Number(url.searchParams.get('after') ?? 0)) });
       }
-      // Local practice reset: no key, but only on servers started with CC_DEMO=1 (never a judge deployment).
-      if (url.pathname === '/admin/demo-reset' && req.method === 'POST') {
-        if (!o.demo || !o.archiveDir) return json(res, 404, { error: { code: 'RESET_OFF', message: 'Reset is turned off on this server.' } });
+      // Start over (owner key): archives the database, then clears cooking sessions, imports and Activity. The owner-authored
+      // example recipes stay listed; nothing is replayed or restored.
+      if (url.pathname === '/admin/start-over' && req.method === 'POST') {
+        if (!owner(req)) return json(res, 401, { error: 'owner capability required' });
+        if (!o.archiveDir) return json(res, 404, { error: { code: 'START_OVER_OFF', message: 'Start over is not available on this server.' } });
         mkdirSync(o.archiveDir, { recursive: true });
-        return json(res, 200, svc.demoReset(join(o.archiveDir, `before-reset-${new Date().toISOString().replace(/[:.]/g, '-')}.db`), true));
+        return json(res, 200, svc.startOver(join(o.archiveDir, `before-start-over-${new Date().toISOString().replace(/[:.]/g, '-')}.db`)));
       }
-      if (url.pathname === '/admin/reset' && req.method === 'POST') {
-        if (!o.adminToken || !sameSecret(req.headers.authorization ?? '', `Bearer ${o.adminToken}`)) return json(res, 401, { error: 'admin capability required' });
-        const b = (await body(req)) as { fixtureId?: string } | undefined;
-        const r = svc.adminReset(b?.fixtureId ?? '');
-        return json(res, r.ok ? 200 : 400, r);
-      }
-      if (o.authoring && (url.pathname.startsWith('/imports') || url.pathname.startsWith('/drafts') || url.pathname.startsWith('/recipes') || url.pathname.startsWith('/authoring/'))) {
-        const ownerToken = o.ownerToken ?? o.adminToken;
-        // owner review needs the owner key, except on a local practice server (CC_DEMO=1; never a judge deployment)
-        if (url.pathname.startsWith('/authoring/') && !o.demo && (!ownerToken || !sameSecret(req.headers.authorization ?? '', `Bearer ${ownerToken}`))) return json(res, 401, { error: 'owner capability required' });
+      if (o.authoring && (url.pathname.startsWith('/imports') || url.pathname === '/uploads' || url.pathname.startsWith('/drafts') || url.pathname.startsWith('/recipes') || url.pathname.startsWith('/authoring/'))) {
+        if (url.pathname.startsWith('/authoring/') && !owner(req)) return json(res, 401, { error: 'owner capability required' });   // owner review and repair
         const approved = req.method === 'GET' && url.pathname.startsWith('/recipes/') ? svc.approvedRecipe(url.pathname.split('/')[2] ?? '') : null;
         if (approved) return json(res, 200, approved);
         return await authoringRoute(o.authoring, req, res, url);
@@ -80,8 +81,7 @@ export function startHttp(svc: Service, o: HttpOptions): Promise<Server> {
     } catch (e) {
       if (!res.headersSent) json(res, 500, { error: (e as Error).message });
     }
-  });
-  return new Promise((resolve) => server.listen(o.port, host, () => resolve(server)));
+  };
 }
 
 /** The built companion. Unknown paths fall back to index.html (single page; no client routes collide with the API). */
@@ -108,6 +108,11 @@ async function authoringRoute(a: Authoring, req: IncomingMessage, res: ServerRes
       }
       const r = await a.createImport(input, key);
       return r.status === 202 ? json(res, 202, { job: r.job, draftId: r.draftId }) : json(res, r.status, { error: r.error });
+    }
+    if (req.method === 'POST' && url.pathname === '/uploads') {   // upload only; the import itself is the import_recipe MCP tool
+      if (!(req.headers['content-type'] ?? '').startsWith('application/pdf')) return json(res, 400, { error: { code: 'NOT_A_PDF', message: "That file isn't a PDF." } });
+      const r = await a.upload(new Uint8Array(await raw(req)), String(req.headers['x-filename'] ?? 'upload.pdf'));
+      return r.status === 201 ? json(res, 201, { sourceDocId: r.sourceDocId }) : json(res, r.status, { error: r.error });
     }
     if (req.method === 'GET' && parts[0] === 'imports' && parts[1]) return json(res, 200, a.getImport(parts[1]));
     if (parts[0] === 'drafts' && parts[1]) {

@@ -4,7 +4,7 @@
 // role and swap come from its validated card (reviewed rules as cross-check), amounts from the source. The Recipe Book
 // shows the imported demo recipes. Engineering content only.
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -12,6 +12,7 @@ import { Authoring } from './authoring/drafts.ts';
 import { recordedExtractor } from './authoring/extract.ts';
 import { recordedAnalyzer } from './authoring/swap-analysis.ts';
 import { DEMO, demoPdf, recordedDemo } from '../tests/fixtures/demo-cards.ts';
+import { coverageSummary } from './contract/project.ts';
 import { Service } from './service/commands.ts';
 import { loadContent } from './service/content.ts';
 import { startHttp } from './service/http.ts';
@@ -24,6 +25,8 @@ const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const outDir = join(root, '.artifacts/walkthrough');
 mkdirSync(outDir, { recursive: true });
 const inputs = join(root, 'private/probes/m2/inputs');
+// evidence-dependent: the M2 probe's frozen inputs and its retained live readings are git-ignored evidence
+for (const need of [inputs, join(root, '.artifacts/probes/m2-replay.json')]) if (!existsSync(need)) { console.error(`EVIDENCE-DEPENDENT: walkthrough:m2 needs ${need} (retained M2 probe evidence; see SETUP.md)`); process.exit(2); }
 const token = randomUUID();
 const content = loadContent();
 const replay = JSON.parse(readFileSync(join(root, '.artifacts/probes/m2-replay.json'), 'utf8')) as Record<string, unknown>;
@@ -33,7 +36,7 @@ const authoring = new Authoring({ store: svc.store, content, extractor: recorded
 svc.catalog = () => authoring.catalog();
 const port = 19000 + Math.floor(Math.random() * 900);
 const base = `http://127.0.0.1:${port}`;
-const server = await startHttp(svc, { port, adminToken: token, authoring });
+const server = await startHttp(svc, { port, ownerToken: token, authoring });
 const client = new Client({ name: 'm2-walkthrough', version: '0.1.0' });
 await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`)));
 
@@ -82,7 +85,11 @@ try {
   check(!!bound && JSON.stringify(bound.quantities) === JSON.stringify(m1.quantities), 'binding quantities equal the M1 approved scone (85 g / 180 ML / 30 ML)');
   draft = (await web('GET', `/drafts/${imp.draftId}`)).draft;
   const saved = await web('POST', `/drafts/${imp.draftId}/save`, { expectedRevision: draft.revision }, { 'idempotency-key': `save-${stamp}` });
-  check(saved.release.kind === 'eligible' && saved.release.coverageSummary === 'Reviewed change on file: heavy cream, step 3 · Prepared at import (AI): a card for 6 of 6 uses', `saved: ${saved.release.coverageSummary ?? JSON.stringify(saved.release)}`);
+  // reviewed recoveries bound on this scone (OD-7 batch 1, 2026-10-08): caster_to_granulated@1 (B6), cream_to_butter_milk@1 (v2
+  // needs the stated cream amount this scone lacks, OD-6) and powder_from_soda_and_tartar@1 (B8); refusals aren't counted here.
+  // The same list as the owner-approved scone compiled from content, with no import.
+  check(saved.release.kind === 'eligible' && saved.release.coverageSummary === 'Reviewed change on file: caster sugar, step 2; heavy cream, step 3; baking powder, step 2 · Prepared at import (AI): a card for 6 of 6 uses'
+    && saved.release.coverageSummary.startsWith(coverageSummary(content.packs.get(RECIPE['scones.demo'])!)), `saved: ${saved.release.coverageSummary ?? JSON.stringify(saved.release)}`);
   for (const d of DEMO.filter((x) => x.name !== 'scones')) {
     const im = await web('POST', '/imports', demoPdf(d.lines), { 'x-filename': `${d.name}.pdf` });
     await waitJob(im.job.id);

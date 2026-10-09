@@ -1,0 +1,32 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "REFUSAL",
+  "patternId": "confectioners_for_sugar_in_dry_mix",
+  "version": 1,
+  "title": "Powdered sugar for the sugar in a baked dough's dry mix",
+  "target": {
+    "ingredientClass": "sugar",
+    "performsAll": [
+      "SWEETNESS"
+    ],
+    "stepTechnique": "COMBINE_DRY"
+  },
+  "slots": [],
+  "applicability": [],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "NONE",
+    "basis": "B5, scoped to the dry mix of a baked dough. OD-7 (owner commission 2026-10-08, ENGINEERING only; not culinary validation, not released guidance). Evidence: private/research/substitution-knowledge (2026-10-07). ATK SRC-SU-11#a (powdered sugar should not be used for granulated in most recipes; contains cornstarch); KA SRC-SU-01#h, SRC-SU-01#g; Domino SRC-SU-20#a, SRC-SU-22#a (summarizer-only, corroboration). Not generalized to whipped cream, icings, other sugar forms or techniques."
+  },
+  "proposal": {
+    "classes": [
+      "confectioners-sugar"
+    ],
+    "match": "EQUALS"
+  },
+  "response": "NOT_FUNCTIONALLY_EQUIVALENT",
+  "requiredFunctionLabel": "sweetness",
+  "text": "Powdered (icing) sugar can't simply replace the sugar in this dough's dry mix: it's ground to a powder and contains starch, so it doesn't behave like crystal sugar in a baked dough.",
+  "scopeNote": "This is about powdered sugar in this baked dough's dry mix only. Whipped cream, icings and recipes written for powdered sugar are different.",
+  "answer": "doesn't behave like crystal sugar in this baked dough"
+}

@@ -4,7 +4,7 @@
 import { z } from 'zod';
 import type { Amount, Id, Ingredient, IngredientUse, Provenance, Recipe, Step, Vocabulary } from '../contract/types.ts';
 import { hash } from '../domain/rational.ts';
-import { parseAmount } from '../domain/recipe.ts';
+import { parseAmount, renderStep } from '../domain/recipe.ts';
 import { estimateUsd, NOVA, NovaClient } from './nova.ts';
 import { allLines, norm, type SourcePage } from './source.ts';
 
@@ -45,22 +45,28 @@ export function userMessage(pages: SourcePage[]): string {
 }
 
 export type ExtractResult =
-  | { ok: true; raw: unknown; extractor: string; usage: { inputTokens: number; outputTokens: number } | null; costUsd: number }
+  | { ok: true; raw: unknown; extractor: string; usage: { inputTokens: number; outputTokens: number } | null; costUsd: number; /** a recording: the prompt that produced it */ promptHash?: string }
   | { ok: false; error: 'LIVE_EXTRACTION_REQUIRED' | 'TIMEOUT' | 'CALL_FAILED' | 'NO_TOOL_CALL' | 'BUDGET_EXCEEDED' | 'LIVE_DISABLED'; detail: string; extractor: string; usage: { inputTokens: number; outputTokens: number } | null; costUsd: number };
 export interface Extractor { readonly name: string; extract(pages: SourcePage[], v: Vocabulary, key: string, label: string): Promise<ExtractResult> }
 
 /** Recorded readings keyed by the hash of the extraction input. Unknown input is refused, never presented as read. */
-export function recordedExtractor(recordings: Record<string, unknown>, name = 'RECORDED'): Extractor {
+export function recordedExtractor(recordings: Record<string, unknown>, name = 'RECORDED', origin?: (key: string) => { extractor: string; promptHash: string } | null): Extractor {
   return {
     name,
     async extract(pages) {
-      const raw = recordings[hash(userMessage(pages))];
+      const key = hash(userMessage(pages)), raw = recordings[key], o = origin?.(key) ?? null;
       return raw === undefined
         ? { ok: false, error: 'LIVE_EXTRACTION_REQUIRED', detail: 'This document has no recorded reading, and live extraction is off.', extractor: name, usage: null, costUsd: 0 }
-        : { ok: true, raw, extractor: name, usage: null, costUsd: 0 };
+        : { ok: true, raw, extractor: o ? `${name} of ${o.extractor}` : name, usage: null, costUsd: 0, ...(o ? { promptHash: o.promptHash } : {}) };
     },
   };
 }
+
+/** Live reading is off on this server: every import says so. Never a canned reading. */
+export const offExtractor: Extractor = {
+  name: 'OFF',
+  async extract() { return { ok: false, error: 'LIVE_EXTRACTION_REQUIRED', detail: 'Reading a recipe needs the live reader, which is off on this server.', extractor: 'OFF', usage: null, costUsd: 0 }; },
+};
 
 export function novaExtractor(nova: NovaClient): Extractor {
   const name = `LIVE_NOVA:${NOVA.modelId}`;
@@ -85,11 +91,38 @@ export interface DraftBody {
   sourceRefs: Record<Id, SourceRef | null>;          // ingredient / step / use id → where it was read
   issues: Issue[];
   extractionId: Id;
+  /** uses placed by their quote without its article (2026-10-07); before that they were left unplaced */
+  barePlaced?: Id[];
 }
 export type BuildResult = { ok: true; body: DraftBody } | { ok: false; code: 'SCHEMA' | 'REFERENCE' | 'NO_RECIPE_FOUND' | 'FIDELITY'; issues: Issue[] };
 
 export const FIDELITY_LIMIT = 0.2;
 const squash = (s: string) => norm(s).replace(/[‘’]/g, "'").replace(/[“”]/g, '"');
+/**
+ * Method coverage against the source (closure 2026-10-08). For each step, in order: is its wording (rendered from the
+ * reading's own quoted words) found in the source text after the previous step, and what source text sits unaccounted for
+ * between the two? Step numbers, bullets and punctuation don't count. A page without a text layer counts as unaccounted
+ * text, and a page with uncertain reading order makes every step unlocated. Deterministic; no model, no keyword list: this
+ * records what the reading did not take in, so a rule can refuse to treat an unread passage as absent.
+ */
+export function methodCoverage(r: Recipe, pages: SourcePage[]): void {
+  const flat = (s: string) => squash(s).toLowerCase().replace(/[–—]/g, '-');
+  if (pages.some((p) => p.status === 'TEXT' && p.readingOrder === 'READING_ORDER_UNCERTAIN')) {
+    for (const s of r.steps) s.source = { located: false, gapBefore: '[reading order uncertain]' };
+    return;
+  }
+  const text = flat(pages.map((p) => (p.status === 'TEXT' ? p.lines.map((l) => l.text).join(' ') : ' [unreadable page] ')).join(' '));
+  const residual = (gap: string) => gap.replace(/(?:^|\s)(?:step\s*)?\d+\s*[.)](?=\s|$)/g, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  let cursor = 0;
+  for (const s of r.steps) {
+    const words = flat(renderStep(r, s));
+    const at = words ? text.indexOf(words, cursor) : -1;
+    if (at < 0) { s.source = { located: false, gapBefore: '' }; continue; }
+    s.source = { located: true, gapBefore: residual(text.slice(cursor, at)) };
+    cursor = at + words.length;
+  }
+}
+
 /** Opaque, deterministic ids for one reading (never derived from names a reader could mistake for hard-coding). */
 const opaque = (prefix: string, ...parts: unknown[]) => `${prefix}_${hash(parts).slice(0, 10)}`;
 
@@ -143,13 +176,19 @@ export function buildDraft(raw: unknown, v: Vocabulary, sources: { sourceId: Id;
     return { stepId: id, title: s.title, text: norm(s.text).replace(/^\d+[.)]\s*/, '').replace(/\{|\}/g, ''), technique: s.technique ? { techniqueId: s.technique, prov: proposed() } : null,
       dependsOn: n > 0 ? [stepId.get(x.steps[n - 1].key)!] : [], duration: duration(s.text), prov: proposed() };
   });
-  const uses: IngredientUse[] = [];
+  const uses: IngredientUse[] = [], barePlaced: Id[] = [];
   x.uses.forEach((u, n) => {
     const useId = opaque('use', extractionId, 'u', n);
     const step = steps.find((s) => s.stepId === stepId.get(u.stepKey))!;
     // tokenize: replace the quoted words (outside existing tokens) with {use:id}; displayText keeps the source wording
     const re = new RegExp(`(?<![{:])${escapeRe(norm(u.quote))}(?![^{]*\\})`, 'i');
-    const m = re.exec(step.text);
+    // a quote with an article the step doesn't have ("the sugar" in "Whisk the flour, sugar, …"): the bare words, when they
+    // occur exactly once as whole words outside tokens; anything else stays unplaced (fail closed)
+    const bare = norm(u.quote).replace(/^(?:the|a|an)\s+/i, '');
+    const reBare = new RegExp(`(?<![{:\\p{L}])${escapeRe(bare)}(?![\\p{L}])(?![^{]*\\})`, 'giu');
+    const exact = re.exec(step.text);
+    const m = exact ?? (bare !== norm(u.quote) && (step.text.match(reBare)?.length ?? 0) === 1 ? new RegExp(reBare.source, 'iu').exec(step.text) : null);
+    if (m && !exact) barePlaced.push(useId);
     if (m) step.text = step.text.slice(0, m.index) + `{use:${useId}}` + step.text.slice(m.index + m[0].length);
     else issues.push({ code: 'USE_QUOTE_NOT_IN_STEP', about: useId, detail: u.quote });
     const k = x.steps.findIndex((s) => s.key === u.stepKey), amount = amountFrom(u.amountText, x.steps[k].text, useId);
@@ -175,7 +214,7 @@ export function buildDraft(raw: unknown, v: Vocabulary, sources: { sourceId: Id;
     schema: 'cc-recipe/2', recipeId, revision: 1, title: x.title ? norm(x.title) : 'Untitled recipe', meta: x.yield ? norm(x.yield) : '',
     volumeSystem: vol, source: { label: 'Imported recipe', rights: 'UNKNOWN' }, ingredients, steps, uses,
   };
-  return { ok: true, body: { recipe, sourceRefs, issues, extractionId } };
+  return { ok: true, body: { recipe, sourceRefs, issues, extractionId, ...(barePlaced.length ? { barePlaced } : {}) } };
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

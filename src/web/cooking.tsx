@@ -415,7 +415,8 @@ function Rescue({ rx, setRx, run, active, steps, st, openIngs, wide, pend, close
         </div>
       ) : (
         <div className="scroll" style={{ flex: 1, display: 'flex', gap: 18, padding: '18px 22px', alignItems: 'stretch' }}>
-          <div className="card in" style={{ flex: 1.7, minWidth: 0, border: '2px solid var(--cc-text)', borderRadius: 16, padding: '30px 36px', gap: 18, justifyContent: 'center' }}>
+          <div className="card in" style={{ flex: 1.7, minWidth: 0, minHeight: 0, border: '2px solid var(--cc-text)', borderRadius: 16, padding: 0, gap: 0, overflow: 'hidden' }}>
+          <div className="scroll" style={{ flex: 1, padding: '30px 36px', display: 'flex', flexDirection: 'column', gap: 18, justifyContent: 'safe center' }}>
             {rx.phase === 'evaluating' && <div role="status" style={{ display: 'flex', gap: 14, alignItems: 'center' }}><span className="dots"><i /><i /><i /></span><span style={{ fontFamily: 'var(--cc-font-head)', fontSize: 30, fontWeight: 700 }}>Checking your recipe and the steps you’ve marked…</span></div>}
             {res && (res.pick || ev?.outcome === 'needsInterpretation') && <>{ev?.outcome === 'needsInterpretation' && ev.prompt !== 'Which ingredient are you out of?' && <span style={{ fontSize: 19 }}>{ev.prompt}</span>}{picker(ev?.id)}</>}
             {res && !res.pick && ev?.outcome === 'needsFacts' && <>
@@ -430,7 +431,6 @@ function Rescue({ rx, setRx, run, active, steps, st, openIngs, wide, pend, close
               <span className="muted" style={{ fontSize: 16 }}>Answering doesn’t change your recipe.{ev.questions.length > 1 ? ' Each question is answered separately.' : ''}</span>
             </>}
             {res && !res.pick && ev?.outcome === 'refused' && <><RefusalCard r={ev.refusal} name={missingName} ordOf={ordOf} answer={ev.answer.text} noRule={ev.why.verdict === 'noRule'} /><WhyList ev={ev} /></>}
-            {res && !res.pick && ev?.outcome === 'refused' && backBtns}
             {rx.phase === 'unknown' && rx.checking && <div role="status" style={{ display: 'flex', gap: 14, alignItems: 'center' }}><span className="dots"><i /><i /><i /></span><span style={{ display: 'flex', flexDirection: 'column', gap: 4 }}><span style={{ fontFamily: 'var(--cc-font-head)', fontSize: 30, fontWeight: 700 }}>Checking whether the change was saved…</span><span className="muted" style={{ fontSize: 17 }}>This reads your recipe. It doesn’t send a new change.</span></span></div>}
             {rx.phase === 'unknown' && !rx.checking && pend && <>
               <span className="eyebrow" style={{ color: 'var(--cc-attention)', fontSize: 14 }}>Result unknown</span>
@@ -454,6 +454,8 @@ function Rescue({ rx, setRx, run, active, steps, st, openIngs, wide, pend, close
               <span className="muted" style={{ fontSize: 15 }}>Re-checking evaluates your recipe as it is now. If a change is still possible, you’ll see it before anything is applied.</span>
             </>}
             {rx.phase === 'message' && <><span style={{ fontFamily: 'var(--cc-font-head)', fontSize: 30, fontWeight: 700 }}>{rx.title}</span><span style={{ fontSize: 20 }}>{rx.text}</span><button className="b primary" style={{ alignSelf: 'flex-start' }} onClick={() => close()}>Back to step {cur?.ordinal}</button></>}
+          </div>
+          {res && !res.pick && ev?.outcome === 'refused' && <div style={{ flex: 'none', padding: '14px 36px 18px', borderTop: '1px solid var(--cc-border)' }}>{backBtns}</div>}
           </div>
           <aside aria-label="Your recipe right now" style={{ flex: 1, minWidth: 250, maxWidth: 360, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <span className="eyebrow">Your recipe right now</span>

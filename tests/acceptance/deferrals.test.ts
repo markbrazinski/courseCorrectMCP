@@ -21,7 +21,10 @@ describe('deferred ops fail closed (ESOD §4.1)', () => {
       const p = compileSource(source(RECIPE['risotto.demo']), vocab, ps);
       expect(p.bindings).toEqual([]);
       expect(p.coverage.find((c) => c.patternId === 'split')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: `UNSUPPORTED_OP:${op.op}` } });
-      expect(compileSource(source(RECIPE['shortcake.demo']), vocab, ps).bindings.map((b) => b.patternId)).toEqual(['whip_needs_cream']);
+      // other patterns unaffected: the shortcake binds exactly what it binds without the deferred op (batch 1 added more than the whip rule)
+      const ids = (xs: typeof patterns) => compileSource(source(RECIPE['shortcake.demo']), vocab, xs).bindings.map((b) => b.patternId);
+      expect(ids(ps)).toEqual(ids(patterns));
+      expect(ids(ps)).toContain('whip_needs_cream');
     });
   }
 });

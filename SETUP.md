@@ -5,68 +5,97 @@
 - Node.js 22.18 or later (native TypeScript; `node:sqlite`)
 - Git
 
-## Install and check
+## Install and check (works on a clean checkout; no paid calls)
 
 ```sh
 npm ci
 npm run typecheck
-npm test
-npm run walkthrough      # M1: real MCP client over HTTP; writes .artifacts/walkthrough/ (ignored)
-npm run walkthrough:m2   # M2: import/review/save over HTTP + cooking over MCP (needs the retained probe replay; see below)
+npm test                          # acceptance suite, including the product startup guards
+npm run walkthrough               # M1: real MCP client over HTTP; writes .artifacts/walkthrough/ (ignored)
 npx playwright install chromium   # once
-npm run e2e              # M3: 15 connected journeys in Chromium against the real service (no paid calls)
+npm run e2e                       # connected journeys in Chromium against the real service code
 ```
 
-The import journeys in `npm run e2e` need the retained M2 readings (`.artifacts/probes/m2-replay.json`). Without them, extraction reports that live extraction is required.
+The browser suites start a **test-only** server, `tests/support/server.ts`, never the product entry point. It wires the labelled test doubles (recorded readings, swap cards and intents) and a fixture-scene route, `POST /admin/reset`.
+
+## Evidence-dependent checks (optional)
+
+These replay retained outputs of earlier live Amazon Nova probes. Those outputs are kept out of the repository, so these checks don't run on a clean checkout. Without the evidence, each check stops or skips with an `EVIDENCE-DEPENDENT` message naming the missing file.
+
+| Check | Needs (git-ignored) |
+|---|---|
+| `npm run e2e` journey "A-2 lemon partial read" (skipped without it) | `.artifacts/probes/m2-replay.json` |
+| `npm run walkthrough:m2` (M2: import, review and save over HTTP, cooking over MCP) | `private/probes/m2/inputs/`, `.artifacts/probes/m2-replay.json` |
+| `npm run e2e:review` (import review → save → reload → cook → rescue on the real scone PDFs) | `.artifacts/probes/{cards,cards2,cards3}-replay.json`, `private/probes/cards/scones.pdf` |
+
+## Paid checks (never run automatically)
+
+These need an owner authorization and the `coursecorrect-nova` AWS profile:
+- `npm run e2e:live`: live Nova interpretation and Polly speech through the companion.
+- The probe scripts (`npm run probe:*`).
+
+## Sample recipe
+
+`samples/scones-explicit.pdf` is the supported sample for trying an import.
+- **What it is:** an owner-authored ENGINEERING demo recipe (cream scones with 300 ML cream for the dough and 15 ML for brushing). The brushing amount follows America's Test Kitchen *Glazed Scones*.
+- **What it isn't:** kitchen-tested or released cooking guidance.
+- **Needs a live reader:** importing it needs `CC_EXTRACTOR=live`. With live reading off, the import reports that live reading is required.
 
 ## Run the companion and service
 
 ```sh
-CC_ADMIN_TOKEN=<choose-a-secret> CC_OWNER_TOKEN=<choose-a-key> npm start   # builds src/web into dist/web, then serves
+npm start   # builds src/web into dist/web, then serves http://127.0.0.1:8791/ (desktop Chrome for voice)
 ```
 
-Open `http://127.0.0.1:8791/` in desktop Chrome. `npm run serve` starts the service without rebuilding.
+`npm run serve` starts the service without rebuilding.
 
-The companion has no owner review screen (owner decision 2026-10-02). The authoring routes below stay on the server for scripted owner work; without `CC_OWNER_TOKEN` (or `CC_ADMIN_TOKEN`) they are unavailable.
+**With nothing configured, every model and speech service is off:**
+- The Recipe Book lists the owner-authored example recipes (risotto, scones, shortcake), and cooking, rescue, refusal and apply all work.
+- A free-text request asks which ingredient is missing; tap it.
+- Importing a recipe reports that live reading is required.
+- Replies are text only.
+
+**Each live service is a separate setting**, and needs `CC_LIVE=1`, the `coursecorrect-nova` AWS profile (a non-root IAM user; the service refuses to start otherwise) and an owner authorization record. For example:
+
+```sh
+CC_LIVE=1 CC_INTERPRETER=nova CC_SPEECH=polly CC_EXTRACTOR=live CC_ANALYZER=live CC_OWNER_TOKEN=<choose-a-key> npm start
+```
+
+**Spending:**
+- Every live call is reserved and settled in `.artifacts/ledger/nova-ledger.jsonl` against that authorization's call and dollar caps, and is never retried automatically.
+- Polly audio is cached by its exact text and settings in `.artifacts/speech-cache/`.
+- Credentials stay server-side.
+- `npm run e2e:live` is a small paid check; `npm run evidence:m3` collects a real-audio walkthrough's records.
+
+The companion has no owner review screen (owner decision 2026-10-02). The owner routes below need `CC_OWNER_TOKEN`; without it they are unavailable.
 
 | Endpoint | Purpose |
 |---|---|
 | `/mcp` | Streamable HTTP; the eight tools (six cooking tools, `import_recipe`, `delete_recipe` = archive) |
-| `POST /admin/reset {"fixtureId": "..."}` | Bearer `CC_ADMIN_TOKEN`; resets to a fixture |
 | `GET /activity` | Server-recorded MCP calls |
 | `GET /health` | Health check |
 | `GET /` | The companion (built files in `dist/web`) |
 | `POST /speech {"evaluationId"} \| {"runId","stepId","amendmentId"?}` | Polly audio for text the service rendered ("Change applied." only for an amendment the run holds). It never accepts arbitrary text. Header `x-speech-id` names the cached clip; its exact text and settings are in `.artifacts/speech-cache/<id>.json` |
+| `POST /uploads` | `application/pdf` body (header `x-filename`): stores the file and returns `{"sourceDocId"}`; nothing is read. The companion then imports it with the `import_recipe` MCP tool, and removes recipes with `delete_recipe` (archive) |
 | `POST /imports` | `application/pdf` body (header `x-filename`) or `{"kind":"text","text":"…"}`; optional `Idempotency-Key` |
-| `GET /imports/:jobId`, `GET /drafts/:id`, `POST /drafts/:id/{append-text,save}`, `GET /recipes/:id` | Import, pasted missing steps and save |
-| `GET /authoring/drafts/:id/requirements`, `GET /authoring/vocabulary`, `POST /authoring/drafts/:id/{assertions,revisions}` | Owner review and repair (bearer `CC_OWNER_TOKEN`, defaults to `CC_ADMIN_TOKEN`) |
+| `GET /imports/:jobId`, `GET /drafts/:id`, `POST /drafts/:id/{append-text,save}`, `GET /recipes/:id` | Import, pasted missing steps and save. Each ingredient use shows one analysis status (alternative available, no alternative found, checking, check failed, can't check yet, not checked yet), from the server's per-use `analysis` (FE–BE Contract v1 Amendment 1). |
+| `GET /authoring/drafts/:id/requirements`, `GET /authoring/vocabulary`, `POST /authoring/drafts/:id/{assertions,revisions}` | Owner review and repair (bearer `CC_OWNER_TOKEN`) |
+| `POST /admin/start-over` | Bearer `CC_OWNER_TOKEN`. Copies the database to `<db folder>/archive/`, then clears cooking sessions, imports and Activity. The example recipes stay. |
 
-Environment variables:
+Environment variables (any value not listed stops startup):
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `CC_PORT` | `8791` | Listen port |
 | `CC_DB` | `.artifacts/runtime/coursecorrect.db` | SQLite file (ignored) |
-| `CC_EXPLAINER` | `none` | `none`: refusal answers use the template built from the engine's facts. `nova`: live wording of those facts (needs `CC_LIVE=1` and an authorization naming the `explanation` purpose; any rejected answer falls back to the template) |
-| `CC_INTERPRETER` | `none` | `none`: free text falls back to an ingredient menu. `recorded`: replays the labeled fixtures in `tests/fixtures/recorded-intents.ts`. `nova`: live (needs `CC_LIVE=1`) |
-| `CC_SPEECH` | `off` | `polly`: spoken replies (needs `CC_LIVE=1` and an AWS user allowed `polly:SynthesizeSpeech`) |
+| `CC_OWNER_TOKEN` | unset | Bearer key for the owner routes |
+| `CC_EXTRACTOR` | `none` | Reading a recipe at import. `none`: imports report that live reading is required. `live`: Nova. |
+| `CC_ANALYZER` | `none` | AI swap cards at import. `none`: no AI alternatives (each use reads "not checked yet"; reviewed policies still apply). `live`: Nova, with one bounded correction round. |
+| `CC_INTERPRETER` | `none` | `none`: free text falls back to an ingredient menu. `nova`: live. |
+| `CC_EXPLAINER` | `none` | `none`: refusal answers use the template built from the engine's facts. `nova`: live wording of those facts (needs an authorization naming the `explanation` purpose; any rejected answer falls back to the template). |
+| `CC_SPEECH` | `off` | `polly`: spoken replies (the AWS user needs `polly:SynthesizeSpeech`) |
+| `CC_LIVE` | unset | `1` allows live calls at all |
 | `CC_AUTHORIZATION` | `live-authorization-m3.json` | Owner authorization record under `private/architecture/` that live calls are charged against |
-| `CC_EXTRACTOR` | `replay` | `replay`: readings retained from the authorized M2 live probe (`.artifacts/probes/m2-replay.json`, built with `npm run probe:m2 -- replay`). `none`: offline only. `live`: Nova (needs `CC_LIVE=1`) |
-
-Live Nova and Polly run only with `CC_LIVE=1`, the `coursecorrect-nova` AWS profile (non-root; the service refuses to start otherwise) and an owner authorization record. `npm run serve:live` starts the live configuration; `npm run e2e:live` is a small paid check; `npm run evidence:m3` collects a real-audio walkthrough's records. Every call is reserved and settled in `.artifacts/ledger/nova-ledger.jsonl` against that authorization's call and dollar caps, and is never retried automatically. Credentials stay server-side.
-
-## Demo recording runner
-
-```sh
-npm run demo -- --label golden --interpreter nova --speech polly        # live take (paid; charged to the M3 authorization)
-npm run demo                                                            # rehearsal: RECORDED interpreter, cached Polly replies
-```
-
-The runner starts its **own** service and a fresh database per take (`.artifacts/demo/takes/<take>/`; port 18793), so your ordinary session is never reset. It drives the companion through the canonical timeline (`private/demo/timeline.json`, ignored), records the screen (product viewport only), screenshots, MCP activity, server records and every Polly reply with its exact text, then writes an editing package to `.artifacts/demo/packages/<take>/` (`index.html` recorded playback, `script.md`, `timeline.json/csv`, `IMOVIE.md`, 48 kHz WAV and MP4 derivatives beside the originals).
-
-Keys (in the terminal, never in the product): **space/enter/→** advance one cue (after a mismatch: check again; the action is repeated only if the server recorded nothing) · **p** auto pacing on/off · **r** replay the last CourseCorrect reply from the take folder (no request) · **s** restart the scene through the admin fixture path (fresh run) · **q** end the take.
-
-Options: `--alice typed|mic|file` (typed is labelled as typed; `mic` uses Chrome speech recognition; `file` plays `private/demo/alice/<cueId>.wav|m4a` aloud into the microphone), `--upload manual|auto` (manual: you choose the PDF and press Upload and read), `--auto`, `--from <cueId>`, `--record-mic`, `--polly-speed 1.1` (speed-adjusted copies in `audio/derived/`). Re-export a take with `npm run demo:export -- <takeDir>`.
 
 ## Repository policy
 

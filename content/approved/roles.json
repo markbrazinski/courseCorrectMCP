@@ -6,7 +6,13 @@
     { "kindId": "heavy-cream", "techniqueId": "BRUSH", "functions": ["BROWNING"], "note": "Cream brushed on top is there for browning." },
     { "kindId": "heavy-cream", "techniqueId": "WHIP", "functions": ["AERATION"], "note": "Whipped cream holds air." },
     { "kindId": "dry-white-wine", "techniqueId": "DEGLAZE", "functions": ["LIQUID", "ACIDITY", "FLAVOR"], "note": "Wine poured in to deglaze is liquid, acidity and flavor." },
-    { "kindId": "unsalted-vegetable-stock", "techniqueId": "LADLE_STOCK", "functions": ["LIQUID"], "note": "Stock ladled into risotto is its cooking liquid." }
+    { "kindId": "unsalted-vegetable-stock", "techniqueId": "LADLE_STOCK", "functions": ["LIQUID"], "note": "Stock ladled into risotto is its cooking liquid." },
+    { "kindId": "baking-powder", "techniqueId": "COMBINE_DRY", "functions": ["LEAVENING"], "note": "Baking powder whisked into the dry ingredients is what makes the dough rise (OD-7)." },
+    { "kindId": "white-sugar", "techniqueId": "COMBINE_DRY", "functions": ["SWEETNESS"], "note": "Sugar whisked into the dry ingredients sweetens the dough (OD-7)." },
+    { "kindId": "caster-sugar", "techniqueId": "COMBINE_DRY", "functions": ["SWEETNESS"], "note": "Caster sugar whisked into the dry ingredients sweetens the dough (OD-7)." },
+    { "kindId": "plain-flour", "techniqueId": "COMBINE_DRY", "functions": ["STRUCTURE"], "note": "Flour in the dry mix is the dough's structure (OD-7)." },
+    { "kindId": "unsalted-butter", "techniqueId": "RUB_IN", "functions": ["FAT"], "note": "Cold butter rubbed into the flour is the dough's fat (OD-7)." },
+    { "kindId": "whole-milk", "techniqueId": "MIX_DOUGH", "functions": ["LIQUID"], "note": "Milk stirred into a dough is its liquid (OD-7)." }
   ],
   "cues": {
     "MIX_DOUGH": ["\\bdough\\b", "(?:^|[.;!]\\s+)stir in\\b"],
@@ -15,6 +21,11 @@
     "DEGLAZE": ["\\bpour in\\b.*\\bwine\\b"],
     "LADLE_STOCK": ["\\bladle"],
     "COMBINE_DRY": ["(?:^|[.;!]\\s+)whisk\\b.*\\b(?:flour|dry)\\b"],
-    "OFF_HEAT_FINISH": ["\\boff the heat\\b"]
+    "OFF_HEAT_FINISH": ["\\boff the heat\\b"],
+    "RUB_IN": ["(?:^|[.;!]\\s+)rub (?:it |them )?in\\b"],
+    "PREHEAT": ["\\b(?:pre)?heat the oven\\b"],
+    "BAKE": ["(?:^|[.;!]\\s+)bake\\b", "\\band bake\\b"],
+    "SHAPE": ["(?:^|[.;!]\\s+)(?:pat|roll|shape)\\b"],
+    "TRAY": ["(?:^|[.;!]\\s+)(?:place|arrange|transfer|put)\\b[^.;!]*\\b(?:tray|sheet|pan)\\b"]
   }
 }

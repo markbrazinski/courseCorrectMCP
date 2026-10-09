@@ -1,0 +1,35 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "REFUSAL",
+  "patternId": "leavening_not_omittable",
+  "version": 1,
+  "title": "Leaving out the leavening",
+  "target": {
+    "ingredientClass": "leavener",
+    "performsAll": [
+      "LEAVENING"
+    ],
+    "stepTechnique": "COMBINE_DRY"
+  },
+  "slots": [],
+  "applicability": [
+    {
+      "kind": "RECIPE_HAS_USE_OF_CLASS",
+      "classId": "leavener",
+      "expect": false
+    }
+  ],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "NONE",
+    "basis": "B2, an outcome-preservation policy: the effect of leaving it out is sourced (ATK SRC-LV-02#a 'Without leaveners, baked goods would be dense and squat'; Bob's Red Mill; ASBE), the refusal is the owner's judgement (D-7). OD-7 (owner commission 2026-10-08, ENGINEERING only; not culinary validation, not released guidance). Evidence: private/research/substitution-knowledge (2026-10-07). Scope: the only leavener, whisked into the dry mix (COMBINE_DRY); another leavening source in the recipe leaves it out of scope, an unconfirmed ingredient leaves it unknown."
+  },
+  "proposal": {
+    "classes": [],
+    "match": "OMISSION"
+  },
+  "response": "NOT_FUNCTIONALLY_EQUIVALENT",
+  "requiredFunctionLabel": "leavening",
+  "text": "Leaving the leavening out with nothing in its place isn't offered: it's what makes this dough rise, and without it the result bakes dense and squat instead of the recipe's intended rise.",
+  "scopeNote": "This keeps the recipe's intended result; it isn't a claim that nothing can be baked without it. Replacements are answered separately."
+}

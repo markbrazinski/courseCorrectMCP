@@ -80,15 +80,16 @@ const usesOf = (auth: Authoring, draftId: string, name: string) => {
 };
 
 describe('A-1 scone PDF → swap plan computed at reading → save → cook, with no human input (owner decision 2026-10-02)', () => {
-  it('wrong model role guesses: roles come from the swap cards, reviewed where the role table agrees; the guesses stay display-only', async () => {
+  it('wrong model role guesses: roles come from the approved role table where kind and technique are confirmed (R-1, MACHINE_CHECKED); the guesses stay display-only', async () => {
     const { auth } = await setup();
     const { job, draftId } = await importPdf(auth, sconePdf, 'scones.pdf');
     expect(job).toMatchObject({ state: 'succeeded', stagesCompleted: ['reading', 'recipeFound', 'ingredientsAndSteps', 'uses', 'proposedFunctions', 'coverage'], failure: null });
     const cream = usesOf(auth, draftId, 'heavy cream');
     expect(cream.map((u) => u.step)).toEqual([3, 6]);
     expect(cream.map((u) => u.proposedFunction?.labels)).toEqual([['liquid', 'aeration'], ['fat']]);    // what the model guessed
-    expect(cream.map((u) => u.reviewedFunction?.labels)).toEqual([['liquid', 'fat'], ['browning']]);   // the cards, matching the table
-    expect(cream.map((u) => u.reviewedFunction?.reviewId)).toEqual(['roles.json', 'roles.json']);
+    expect(cream.map((u) => u.reviewedFunction?.labels)).toEqual([['liquid', 'fat'], ['browning']]);   // the approved table's rows
+    expect(cream.map((u) => u.reviewedFunction?.reviewId)).toEqual(['roles.json#heavy-cream×MIX_DOUGH (content-decisions.md#OD-4; R-1)', 'roles.json#heavy-cream×BRUSH (content-decisions.md#OD-4; R-1)']);
+    expect(cream.map((u) => u.reviewedFunction?.authority)).toEqual(['MACHINE_CHECKED', 'MACHINE_CHECKED']);
     const fx = auth.effective(draftId)!;
     expect(fx.uses.filter((u) => u.functions.some((f) => f.prov.status === 'REVIEWED')).every((u) => u.functions.every((f) => f.prov.by === 'CONTENT'))).toBe(true);
     expect(fx.ingredients.find((i) => i.name === 'heavy cream')!.listedProv.status).toBe('SOURCE_VERIFIED');
@@ -107,7 +108,9 @@ describe('A-1 scone PDF → swap plan computed at reading → save → cook, wit
     expect(dough.swap).toMatchObject({ origin: 'reviewed', label: 'Reviewed change' });
     expect(brush.swap).toMatchObject({ kind: 'covered', text: 'Covered by step 3’s swap: a little milk'.replace('’', "'"), origin: 'reviewed' });
     expect(usesOf(auth, draftId, 'plain flour')[0].swap).toMatchObject({ kind: 'refusal', origin: 'importCard', label: 'Prepared at import (AI)', text: 'No, because the flour is the structure of the scones; without it there is no dough.' });
-    expect(usesOf(auth, draftId, 'caster sugar')[0].swap).toMatchObject({ kind: 'recovery', origin: 'importCard', text: 'If you run out: Leave out the caster sugar' });
+    // batch 1 (OD-7): the caster sugar has a reviewed plan now; the salt's omission is still its card's plan
+    expect(usesOf(auth, draftId, 'caster sugar')[0].swap).toMatchObject({ kind: 'recovery', origin: 'reviewed', text: 'If you run out: Granulated sugar for caster sugar in a dry mix' });
+    expect(usesOf(auth, draftId, 'salt')[0].swap).toMatchObject({ kind: 'recovery', origin: 'importCard', text: 'If you run out: Leave out the salt' });
     const b = auth.requirements(draftId).bindings.find((x) => x.patternId === 'cream_to_butter_milk')!;
     expect(b.quantities).toEqual(pack(RECIPE['scones.demo']).bindings.find((x) => x.patternId === 'cream_to_butter_milk')!.quantities);
   });
@@ -116,7 +119,7 @@ describe('A-1 scone PDF → swap plan computed at reading → save → cook, wit
     const { svc, auth } = await setup();
     const { draftId } = await importPdf(auth, sconePdf, 'scones.pdf');
     const saved = auth.save(draftId, { expectedRevision: auth.revision(draftId), idempotencyKey: 'save-1' });
-    expect(saved.release).toEqual({ kind: 'eligible', coverageSummary: 'Reviewed change on file: heavy cream, step 3 · Prepared at import (AI): a card for 6 of 6 uses' });
+    expect(saved.release).toEqual({ kind: 'eligible', coverageSummary: 'Reviewed change on file: caster sugar, step 2; heavy cream, step 3; baking powder, step 2 · Prepared at import (AI): a card for 6 of 6 uses' });   // batch 1 adds the sugar and baking powder plans
     expect(auth.save(draftId, { expectedRevision: 999, idempotencyKey: 'save-1' })).toEqual(saved);   // idempotent
     const page = auth.getRecipe(saved.recipeId).version.content!;
     expect(page.ingredients.flatMap((i) => i.uses.map((u) => u.swap))).toEqual(auth.getDraft(draftId).draft.content!.ingredients.flatMap((i) => i.uses.map((u) => u.swap)));
@@ -150,7 +153,8 @@ describe('A-1 scone PDF → swap plan computed at reading → save → cook, wit
     expect(reviewed.missing).toContainEqual(expect.objectContaining({ predicate: 'FUNCTION', expected: 'BROWNING', have: 'PROPOSED' }));
     expect(dough.swap).toMatchObject({ kind: 'recovery', origin: 'importCard', label: 'Prepared at import (AI)', text: 'If you run out: Milk and cold butter for the heavy cream' });
     expect(brush.swap).toMatchObject({ origin: 'importCard' });
-    expect(auth.save(draftId, { expectedRevision: auth.revision(draftId) }).release).toEqual({ kind: 'eligible', coverageSummary: 'No reviewed changes on file · Prepared at import (AI): a card for 6 of 6 uses' });
+    // the cream rule can't bind (the point of this test); batch 1's sugar and baking powder plans still do
+    expect(auth.save(draftId, { expectedRevision: auth.revision(draftId) }).release).toEqual({ kind: 'eligible', coverageSummary: 'Reviewed change on file: caster sugar, step 2; baking powder, step 2 · Prepared at import (AI): a card for 6 of 6 uses' });
   });
 
   it('an uncorroborated technique (none read for step 3): the reviewed rule names what is missing; the card plan is used, labelled AI', async () => {
@@ -187,9 +191,11 @@ describe('shortcake and household risotto imports: no swap, honestly explained',
     const { auth } = await setup();
     const { draftId } = await importText(auth, SHORTCAKE_LINES.join('\n'));
     const [dough, whip] = usesOf(auth, draftId, 'heavy cream');
-    expect(whip.swap).toMatchObject({ kind: 'refusal', text: 'No swap: whipped topping needs cream' });
-    expect(whip.swap.details[0]).toMatch(/^This catalog doesn't accept milk and butter in place of cream that has to be whipped/);
-    expect(whip.swap.opinion).toMatch(/^No, because this cream has to whip/);                     // the agreeing card is kept beside it
+    // G13 (batch 1): the import analysis's own "no" is the answer; each reviewed refusal answers one replacement, listed beside it
+    expect(whip.swap).toMatchObject({ kind: 'refusal', origin: 'importCard', text: expect.stringMatching(/^No, because this cream has to whip/) });
+    expect(whip.analysis!.status).toBe('evaluatedNoOption');
+    expect(whip.analysis!.ruledOut.map((x) => x.ruleId)).toEqual(['whip_needs_cream@1', 'whip_needs_min_fat_cream@1']);
+    expect(whip.analysis!.ruledOut[0].text).toMatch(/^This catalog doesn't accept milk and butter in place of cream that has to be whipped/);
     expect(dough.swap).toMatchObject({ kind: 'refusal', origin: 'importCard', text: "No for now: The cream is also whipped in step 6, and milk and butter can't be whipped." });
   });
 
@@ -271,8 +277,12 @@ describe('A-2 partial PDF + pasted missing steps (C-4)', () => {
     const r = await auth.createImport({ kind: 'pdf', bytes: lemonPdf, filename: 'lemon-cake.pdf' });
     if (r.status !== 202) throw new Error('import');
     await auth.waitForJob(r.job.id);
-    const step2 = auth.requirements(r.draftId);   // no rule applies: coverage lists no missing facts
-    expect(step2.coverage.flatMap((c) => c.missing)).toEqual([]);
+    const step2 = auth.requirements(r.draftId);
+    // no rule binds; batch 1's sugar and butter rules wait on facts this reading doesn't give (the creaming step has no
+    // recognized technique), so they list them and never bind
+    expect(step2.coverage.filter((c) => c.status === 'BOUND')).toEqual([]);
+    expect([...new Set(step2.coverage.filter((c) => c.missing.length).map((c) => `${c.patternId}:${c.status}`))].sort()).toEqual(['caster_to_granulated:NEEDS_FACTS', 'confectioners_for_sugar_in_dry_mix:NEEDS_FACTS', 'oil_for_cold_butter_rub_in:NEEDS_FACTS']);
+    expect([...new Set(step2.coverage.flatMap((c) => c.missing.map((m) => m.predicate)))].sort()).toEqual(['FUNCTION', 'TECHNIQUE']);
     const core = (await import('../../src/authoring/drafts.ts')).coreHashes(auth.effective(r.draftId)!);
     const step2Id = () => auth.effective(r.draftId)!.steps[1].stepId;   // ids are per reading; facts follow content
     auth.assert(r.draftId, { expectedRevision: auth.revision(r.draftId), reviewer: 'owner', assertions: [{ subject: { kind: 'STEP', id: step2Id() }, predicate: 'TECHNIQUE', value: 'MIX_DOUGH', coreHash: core.get(`STEP|${step2Id()}`)! }] });

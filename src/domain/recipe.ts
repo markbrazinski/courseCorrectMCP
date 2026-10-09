@@ -35,6 +35,18 @@ export function parseAmount(raw: string | { asWritten: string } | null, volumeSy
   return { kind: 'EXACT', value, unit: 'COUNT', asWritten: t };   // "1", "1 clove", "1 medium"
 }
 
+/** A small volume in the recipe's teaspoons or tablespoons, to the nearest quarter ("¾ tsp", "1½ tsp", "1 tbsp"); null
+ *  when it isn't within 2% of a quarter spoon (the caller then fails closed rather than print an odd millilitre figure). */
+export function spoonText(ml: Rational, vol: 'US' | 'METRIC'): string | null {
+  const glyph = (q: number) => { const w = Math.floor(q / 4), f = ['', '¼', '½', '¾'][q % 4]; return w ? `${w}${f}` : f; };
+  const x = ml.n / ml.d;
+  for (const [unit, size] of [['tbsp', TBSP[vol]], ['tsp', TSP[vol]]] as const) {
+    const q = Math.round((x / (size.n / size.d)) * 4);
+    if (q > 0 && Math.abs(q / 4 - x / (size.n / size.d)) <= 0.02 * (q / 4) && (unit === 'tsp' || q % 4 === 0)) return `${glyph(q)} ${unit}`;
+  }
+  return null;
+}
+
 const UNIT_TEXT: Record<Unit, string> = { G: 'g', ML: 'ML', COUNT: '' };
 export const qtyText = (value: Rational, unit: Unit) => `${formatRational(value)}${UNIT_TEXT[unit] ? ' ' + UNIT_TEXT[unit] : ''}`;
 

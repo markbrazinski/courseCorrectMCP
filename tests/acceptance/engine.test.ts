@@ -300,3 +300,55 @@ describe('authority and integrity (B26, B28, B29, determinism)', () => {
     expect(parseAmount('8 oz', 'US')).toMatchObject({ kind: 'EXACT', unit: 'G' });
   });
 });
+
+// SYNTHETIC SOFTWARE EVIDENCE (2026-10-07): the proposed rule v2 shape for an explicit-quantity scone, derived here in code from
+// the approved v1 (base $target; a $brush slot; brushing milk = the stated brushing amount ×1). Not approved content; the
+// amounts are the pending owner decision (private/demo/scone-explicit-proposal/), used only to exercise the engine.
+describe('explicit-quantity scone (synthetic v2 shape): dough-based scaling, brushing accounted separately, availability by purpose', async () => {
+  const { content, compileSource, source, snapshotAfter, doneUpTo } = await import('../helpers.ts');
+  const v1 = content.patterns.find((p) => p.patternId === 'cream_to_butter_milk')!;
+  if (v1.kind !== 'RECOVERY') throw new Error('v1');
+  const v2 = structuredClone(v1);
+  v2.version = 2;
+  v2.slots = [...v1.slots, { slot: 'brush', kind: 'USE_AFTER_TARGET', ingredientClass: 'heavy-cream', performsAll: ['BROWNING'], stepTechnique: 'BRUSH' }];
+  for (const q of ['butter', 'milk', 'milk_extra']) { const e = v2.quantities[q]; if (e.kind === 'SCALE') e.from = '$target'; }
+  v2.quantities.milk_brush = { kind: 'SCALE', from: '$brush', sourceUnit: 'ML', factor: { n: 1, d: 1 }, resultUnit: 'ML', inputDomain: [{ n: 5, d: 1 }, { n: 30, d: 1 }], increment: { n: 1, d: 1 }, maxAbsError: { n: 1, d: 2 }, outputDomain: [{ n: 5, d: 1 }, { n: 30, d: 1 }] };
+  v2.siblingHandlers = [{ ...v1.siblingHandlers[0], replaceWith: { ...v1.siblingHandlers[0].replaceWith, qty: 'milk_brush' } }];
+  const patterns = [...content.patterns.filter((p) => p.patternId !== 'cream_to_butter_milk'), v1, v2];
+  const base = source(content.names.get('scones')!);
+  const explicit = structuredClone(base);
+  explicit.ingredients.find((i) => i.kind === 'heavy-cream')!.listed = '315 ML';
+  const [dough, brush] = explicit.uses.filter((u) => u.ingredient === explicit.ingredients.find((i) => i.kind === 'heavy-cream')!.id);
+  dough.amount = '300 ML'; brush.amount = '15 ML';
+  const step3 = explicit.steps.find((s) => s.text.includes(`{use:${dough.id}}`))!;
+  step3.text = `Stir in {use:${dough.id}} until a soft dough forms.`;
+
+  it('v1 is not applicable to explicit amounts (it carries only "a little"); v2 binds from the dough amount, never the listed total', () => {
+    const p = compileSource(explicit, content.vocab, patterns);
+    const cov = p.coverage.filter((c) => c.patternId === 'cream_to_butter_milk');
+    expect(cov.map((c) => [c.patternVersion, c.status, c.failedCheck?.code ?? null])).toEqual([[1, 'NOT_APPLICABLE', 'CARRY_REQUIRES_AS_WRITTEN'], [2, 'BOUND', null]]);
+    const b = p.bindings.find((x) => x.patternId === 'cream_to_butter_milk')!;
+    expect(Object.fromEntries(Object.entries(b.quantities).map(([k, q]) => [k, q.value.n / q.value.d]))).toEqual({ butter: 85, milk: 180, milk_extra: 30, milk_brush: 15 });
+    expect(b.coveredSiblingUseIds).toEqual([brush.id]);
+    const ambiguous = compileSource(base, content.vocab, patterns);   // the original recipe: v1 binds, v2 can't (no stated brushing amount)
+    expect(ambiguous.coverage.filter((c) => c.patternId === 'cream_to_butter_milk').map((c) => [c.patternVersion, c.status])).toEqual([[1, 'BOUND'], [2, 'NEEDS_FACTS']]);
+  });
+
+  it('one milk question, itemized by purpose (no double counting); the stop condition is kept; started work is protected', () => {
+    const p = compileSource(explicit, content.vocab, patterns);
+    const cream = p.recipe.ingredients.find((i) => i.kind?.kindId === 'heavy-cream')!.ingredientId;
+    const at3 = snapshotAfter(p, doneUpTo(p, 2));
+    const e1 = evaluate(p, content.vocab, at3, { missingIngredientId: cream, proposedKindIds: [], answers: [], notices: [] });
+    expect(e1.questions.flatMap((q) => (q.kind === 'AVAILABILITY' ? q.requirements.map((r) => r.display) : []))).toEqual([
+      '225 ML milk: 180 ML for the dough (step 3) + 15 ML for brushing (step 6) + up to 30 ML extra for the dough, only if needed', '85 g cold butter']);
+    // spoken: the total (the conditional extra included, as the requirement's quantity), then what it includes; purposes from techniques
+    expect(e1.speech).toBe('Do you have 85 grams of butter and 225 millilitres of milk? That includes milk for brushing and up to 30 millilitres extra, only if the dough needs it.');
+    const e2 = evaluate(p, content.vocab, at3, { missingIngredientId: cream, proposedKindIds: [], answers: e1.questions.map((q) => ({ questionId: q.questionId, choiceId: 'ENOUGH' as const })), notices: [] });
+    const c = e2.candidates[0];
+    expect(c.changes.filter((x) => x.after).map((x) => x.after)).toEqual([
+      "Rub 85 g cold butter into the dry mixture until it looks like coarse crumbs, then stir in 180 ML milk until a soft dough forms. Only if needed: up to 30 ML more milk. Add it 1 tablespoon at a time and stop as soon as no dry flour remains. If the dough is still crumbly after that, press it together with your hands; don't add more liquid.",
+      'Brush the tops with 15 ML milk.']);
+    const started = snapshotAfter(p, [...doneUpTo(p, 2), { stepId: p.recipe.steps[2].stepId, progress: 'started' }]);
+    expect(evaluate(p, content.vocab, started, { missingIngredientId: cream, proposedKindIds: [], answers: [], notices: [] }).refusal?.code).toBe('PROTECTED_WORK');
+  });
+});

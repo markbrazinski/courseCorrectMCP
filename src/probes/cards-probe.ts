@@ -7,8 +7,6 @@
 //   node src/probes/cards-probe.ts rehearse → the same import + judging code on the RECORDED test fixtures (no calls)
 //   node src/probes/cards-probe.ts revalidate → the kept live output (replay) through the current code (no calls); the
 //       as-run record stays results-v1.json, this writes revalidated-v1.json
-//   node src/probes/cards-probe.ts seed <db> → imports the three PDFs into <db> from the replay (no calls) and keeps them
-//       as demo recipes across the practice reset. Run only while no server has <db> open.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Authoring } from '../authoring/drafts.ts';
@@ -67,7 +65,7 @@ async function freeze() {
 }
 
 /** Import every frozen PDF once and judge it. `live` → record the replay. */
-async function importAll(dbPath: string, extractor: Extractor, analyzer: SwapAnalyzer, demo: boolean) {
+async function importAll(dbPath: string, extractor: Extractor, analyzer: SwapAnalyzer) {
   const svc = new Service({ dbPath, content, interpreter: noneInterpreter, fixtureRecipes: false });
   const auth = new Authoring({ store: svc.store, content, extractor, analyzer });
   svc.catalog = () => auth.catalog();
@@ -81,7 +79,6 @@ async function importAll(dbPath: string, extractor: Extractor, analyzer: SwapAna
     if (job.state !== 'failed') {
       const s = auth.save(r.draftId, { expectedRevision: auth.revision(r.draftId), idempotencyKey: `cards-probe-${name}` });
       save = s; recipeId = s.recipeId;
-      if (demo) svc.store.run('INSERT OR IGNORE INTO demo_recipes VALUES (?)', s.recipeId);
     }
     out[name] = { draftId: r.draftId, recipeId, job, save };
   }
@@ -174,7 +171,7 @@ async function run() {
   const before = ledger.totals();
   writeFileSync(startedPath, JSON.stringify({ at: new Date().toISOString(), authorization: auth.id, identity: id.principal, ledgerBefore: before }, null, 2));
   const db = join(root, `.artifacts/probes/cards-${Date.now()}.db`);
-  const { svc, auth: a, out } = await importAll(db, novaExtractor(nova), novaAnalyzer(nova), false);
+  const { svc, auth: a, out } = await importAll(db, novaExtractor(nova), novaAnalyzer(nova));
   // keep everything: raw readings, raw cards, validation, wire answers, and the replay of what was read
   const replay = { readings: {} as Record<string, unknown>, cards: {} as Record<string, unknown> };
   const raw: Record<string, unknown> = {};
@@ -203,22 +200,10 @@ async function run() {
   svc.close();
 }
 
-async function seed(dbPath: string | undefined) {
-  if (!dbPath) throw new Error('usage: cards-probe.ts seed <db>');
-  if (!existsSync(replayPath)) throw new Error('no replay: run the probe first');
-  const replay = JSON.parse(readFileSync(replayPath, 'utf8')) as { readings: Record<string, unknown>; cards: Record<string, unknown> };
-  const { svc, auth, out } = await importAll(dbPath, recordedExtractor(replay.readings, 'REPLAY_OF_LIVE_CARD_PROBE'), recordedAnalyzer(replay.cards, 'REPLAY_OF_LIVE_CARD_PROBE'), true);
-  for (const n of NAMES) {
-    const s = out[n].save as { release?: { kind: string; coverageSummary?: string } } | null;
-    console.log(`${n}: ${(out[n].job as { state?: string }).state} · ${s?.release?.coverageSummary ?? s?.release?.kind ?? 'not saved'}`);
-  }
-  void auth; svc.close();
-}
-
 /** run()'s import and judging without calls: RECORDED fixtures (rehearsal) or the kept live output (re-validation). */
 async function rehearse(live: boolean) {
   const rec = live ? JSON.parse(readFileSync(replayPath, 'utf8')) as { readings: Record<string, unknown>; cards: Record<string, unknown> } : await recordedDemo(v);
-  const { svc, auth, out } = await importAll(join(root, `.artifacts/probes/cards-${live ? 'revalidation' : 'rehearsal'}-${Date.now()}.db`), recordedExtractor(rec.readings), recordedAnalyzer(rec.cards), false);
+  const { svc, auth, out } = await importAll(join(root, `.artifacts/probes/cards-${live ? 'revalidation' : 'rehearsal'}-${Date.now()}.db`), recordedExtractor(rec.readings), recordedAnalyzer(rec.cards));
   const judged = judge(svc, auth, out);
   judged.results.X5 = await cookShortcake(svc, out.shortcake.recipeId);
   const note = live ? 'RE-VALIDATION of the kept live output (results-v1.json) by the code as of this file: no new calls; not the as-run result' : 'RECORDED test fixtures, not Nova';
@@ -232,5 +217,4 @@ if (mode === 'freeze') await freeze();
 else if (mode === 'run') await run();
 else if (mode === 'rehearse') await rehearse(false);
 else if (mode === 'revalidate') await rehearse(true);
-else if (mode === 'seed') await seed(process.argv[3]);
-else console.log('usage: cards-probe.ts freeze | run | rehearse | revalidate | seed <db>');
+else console.log('usage: cards-probe.ts freeze | run | rehearse | revalidate');

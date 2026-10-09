@@ -3,6 +3,7 @@
 // model call happens at cook time.
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Authoring } from '../../src/authoring/drafts.ts';
@@ -12,17 +13,17 @@ import { recordedAnalyzer } from '../../src/authoring/swap-analysis.ts';
 import { checkCards, refsOf } from '../../src/compile/cards.ts';
 import { Service } from '../../src/service/commands.ts';
 import { noneInterpreter } from '../../src/service/interpret.ts';
-import { DEMO, demoPdf, recordedDemo, SHORTCAKE_CARDS } from '../fixtures/demo-cards.ts';
-import { SHORTCAKE_LINES, SHORTCAKE_READING } from '../fixtures/demo-sources.ts';
+import { DEMO, demoPdf, recordedDemo, RISOTTO_CARDS, SHORTCAKE_CARDS } from '../fixtures/demo-cards.ts';
+import { RISOTTO_LINES, RISOTTO_READING, SHORTCAKE_LINES, SHORTCAKE_READING } from '../fixtures/demo-sources.ts';
 import { cmd, content, ROOT, vocab } from '../helpers.ts';
 import { hash } from '../../src/domain/rational.ts';
 
 const rec = await recordedDemo(vocab);
 type Name = (typeof DEMO)[number]['name'];
 
-async function imported(names: Name[] = ['risotto', 'scones', 'shortcake'], cards = rec.cards) {
+async function imported(names: Name[] = ['risotto', 'scones', 'shortcake'], cards = rec.cards, readings = rec.readings) {
   const svc = new Service({ dbPath: join(mkdtempSync(join(tmpdir(), 'ccmcp-cards-')), 'db'), content, interpreter: noneInterpreter, fixtureRecipes: false });
-  const auth = new Authoring({ store: svc.store, content, extractor: recordedExtractor(rec.readings), analyzer: recordedAnalyzer(cards) });
+  const auth = new Authoring({ store: svc.store, content, extractor: recordedExtractor(readings), analyzer: recordedAnalyzer(cards) });
   svc.catalog = () => auth.catalog();
   const saved: Record<string, { recipeId: string; recipeVersionId: string; draftId: string }> = {};
   for (const name of names) {
@@ -165,6 +166,69 @@ describe('cooking answers come from cards, with no model call beyond interpretat
   });
 });
 
+describe('a card never contradicts a reviewed rule (live probe finding 2026-10-07: 120 ML lemon juice for 120 ML wine)', () => {
+  // the retained live card for the risotto wine, verbatim except for `functions` in the first case
+  const LEMON = { useRef: 'U6', verdict: 'swap', role: 'adds acidity and helps to deglaze the pan', functions: ['ACIDITY', 'LIQUID'],
+    swap: { ingredient: 'lemon juice', kindId: 'lemon-juice', amountText: '120 ML', otherIngredients: [] },
+    stepRewrites: [{ stepRef: 'S5', text: 'Pour in 120 ML lemon juice and stir until absorbed.' }], siblings: [],
+    tradeoff: "The flavor will be brighter and more acidic, but the dish will lose the wine's characteristic flavor.",
+    opinion: 'Swap dry white wine for lemon juice if you want a brighter, more acidic risotto without the wine flavor.' };
+  const withWineCard = (card: Record<string, unknown>) => {
+    const key = Object.keys(rec.cards).find((k) => JSON.stringify(rec.cards[k]) === JSON.stringify(RISOTTO_CARDS))!;
+    return { ...rec.cards, [key]: { cards: RISOTTO_CARDS.cards.map((c) => (c.useRef === 'U6' ? card : c)) } };
+  };
+  const wineAt = async (cards: Record<string, unknown>, readings = rec.readings) => {
+    const { svc, auth, saved } = await imported(['risotto'], cards, readings);
+    const page = auth.getRecipe(saved.risotto.recipeId).version.content!;
+    const wine = page.ingredients.find((i) => /wine/i.test(i.name))!.uses[0];
+    return { svc, saved, wine, card: auth.catalog()[0].pack!.cards!.find((c) => c.useId === wine.id)! };
+  };
+
+  it('split binds (roles match the table): the lemon card is invalid; the stock-now, lemon-at-finish plan stays available and applies', async () => {
+    const { svc, saved, wine, card } = await wineAt(withWineCard({ ...LEMON, functions: ['LIQUID', 'ACIDITY', 'FLAVOR'] }));
+    expect(card).toMatchObject({ status: 'INVALID', reason: expect.stringMatching(/^CONTRADICTS_REVIEWED_RULE: "Split the wine's jobs" answers this replacement differently: There's no one-for-one lemon swap/) });
+    expect(wine.analysis!.status).toBe('available');
+    expect(wine.analysis!.plans.map((p) => [p.provenance.kind, p.title])).toEqual([['reviewedRule', "Split the wine's jobs"]]);
+    expect(wine.analysis!.plans[0].replacements.map((x) => `${x.amount.display} ${x.ingredientName}`)).toEqual(['120 ML Unsalted vegetable stock', '10 ML Lemon juice']);
+    const k = await cookTo(svc, saved.risotto.recipeId, 4);
+    const ev = await k.askAll(/wine/i, 'yes', ['lemon-juice']);
+    if (ev.outcome !== 'proposal') throw new Error(ev.outcome);
+    expect(ev.proposalResponse).toMatchObject({ response: 'ADAPTED', text: expect.stringMatching(/^There's no one-for-one lemon swap/) });
+    expect(ev.candidates.map((c) => c.headline)).toEqual(['Use hot stock now and lemon juice at the finish instead of the wine.']);
+    const a = apply(svc, ev);
+    if (a.outcome !== 'applied') throw new Error(a.outcome);
+    expect(a.run.steps[4].effectiveText).toBe('Pour in 120 ML hot unsalted vegetable stock and stir until absorbed.');
+    expect(a.run.steps[6].effectiveText).toBe('Off the heat, stir in 30 g butter, 50 g grated Parmesan and 10 ML lemon juice. Season with salt.');
+  });
+
+  it('split waits on a fact (the reading gave step 5 no technique, so the wine role is unconfirmed): the lemon card is still invalid, never shown as usable, never offered or applied', async () => {
+    // R-1 confirms the retained case's roles (split binds there); here nothing confirms step 5, but its wording cue ("pour in … wine")
+    // still shows the reviewed claim's target, and evidence like that may restrict a card
+    const variant = { ...RISOTTO_READING, steps: RISOTTO_READING.steps.map((x) => (x.key === 's5' ? { ...x, technique: null } : x)) };
+    const noTech: Record<string, unknown> = Object.fromEntries(Object.entries(rec.readings).map(([k, x]) => [k, x === RISOTTO_READING ? variant : x]));   // text and PDF keys
+    const key = Object.keys(rec.readings).find((k) => rec.readings[k] === RISOTTO_READING)!;
+    const recCards = (await recordedDemo(vocab)).cards;   // keyed by the original reading; this reading's own key differs
+    const { analysisKey } = await import('../fixtures/demo-cards.ts');
+    const k2 = await analysisKey(noTech[key], RISOTTO_LINES, vocab);
+    const cards = { ...recCards, [k2]: { cards: RISOTTO_CARDS.cards.map((c) => (c.useRef === 'U6' ? LEMON : c)) } };
+    const { svc, saved, wine, card } = await wineAt(cards, noTech);
+    expect(card.status).toBe('INVALID');
+    expect(wine.analysis!.status).toBe('blocked');                      // the reviewed plan, waiting on its facts; no plan offered
+    expect(wine.analysis!.plans).toEqual([]);
+    expect(wine.analysis!.reason!.detail).toMatch(/CONTRADICTS_REVIEWED_RULE/);
+    const k = await cookTo(svc, saved.risotto.recipeId, 4);
+    const ev = await k.askAll(/wine/i, 'yes', ['lemon-juice']);
+    expect(ev.outcome).toBe('refused');
+    expect(ev.proposalResponse?.response).not.toBe('REALIZED_AS_PROPOSED');
+    expect(svc.getActiveRecipe().run!.appliedAmendments).toEqual([]);
+  });
+
+  it('leaving kindId out does not hide the replacement; stock with lemon (not what the claim answers) is not affected', async () => {
+    expect((await wineAt(withWineCard({ ...LEMON, swap: { ...LEMON.swap, kindId: null } }))).card.reason).toMatch(/^CONTRADICTS_REVIEWED_RULE/);
+    expect((await wineAt(rec.cards)).card).toMatchObject({ status: 'SUPERSEDED' });   // the fixture card: 120 ML stock + 1 tbsp lemon, superseded by split
+  });
+});
+
 describe('invalid cards fail closed (never a half-plan)', () => {
   const lines = SHORTCAKE_LINES;
   const r0 = (() => {
@@ -182,6 +246,53 @@ describe('invalid cards fail closed (never a half-plan)', () => {
   it('the fixture card itself is valid', () => expect(reasonFor(dough)).toMatchObject({ status: 'COMPILED', reason: null }));
   it('unparseable amount', () => expect(reasonFor({ ...dough, swap: { ...dough.swap, amountText: '130 ml of milk' } }).reason).toMatch(/^UNPARSEABLE_AMOUNT/));
   it('a missed sibling use', () => expect(reasonFor({ ...dough, siblings: [] }).reason).toBe('SIBLING_MISSED: step 6'));
+  it('ingredient identity: a mislabelled kind fails as such; a true alias is the same ingredient; varieties are not collapsed; omit and no are not swaps', () => {
+    const swapTo = (ingredient: string, kindId: string | null) => reasonFor({ ...dough, swap: { ...dough.swap, ingredient, kindId }, opinion: 'Use it in the dough instead.', tradeoff: 'The shortcakes will be less rich.', siblings: (dough.siblings as { note: string }[]).map((x) => ({ ...x, note: 'The cream in step 6 is whipped, so it stays as written.' })),
+      stepRewrites: [{ stepRef: 'S4', text: `Stir in 130 ML ${ingredient} and 50 g melted butter until just combined.` }] }).reason;
+    expect(swapTo('milk', 'heavy-cream')).toBe('KIND_MISMATCH: "milk" isn\'t heavy cream');              // live probe: chicken stock / baking soda pattern
+    expect(swapTo('heavy cream', null)).toBe('SWAP_IS_SAME_INGREDIENT: heavy cream resolves to heavy cream');                // its own name
+    expect(swapTo('double cream', 'heavy-cream')).toBe('KIND_MISMATCH: "double cream" isn\'t heavy cream');                 // vocabulary v2: a distinct form (fat content), not an alias
+    expect(swapTo('fresh heavy cream', null)).toBe('SWAP_IS_SAME_INGREDIENT: fresh heavy cream resolves to heavy cream');  // preparation word only
+    expect(swapTo('half-and-half', null)).toBeNull();
+    expect(swapTo('whole milk', 'whole-milk')).toBeNull();                                         // a kind's id is one of its names (live probe 2026-10-07)                                                  // a different ingredient compiles
+    const omitSalt = SHORTCAKE_CARDS.cards[3] as Record<string, unknown>;
+    expect(reasonFor(omitSalt)).toMatchObject({ status: 'COMPILED' });
+    expect(reasonFor(SHORTCAKE_CARDS.cards[2] as Record<string, unknown>)).toMatchObject({ status: 'COMPILED', verdict: 'no' });
+  });
+  it('ranked suggestions (ccmcp-swaps-3, owner 2026-10-08): the first that passes is used; each earlier one keeps its reason', async () => {
+    const swapCard = (ingredient: string, kindId: string | null) => ({ ...dough, swap: { ...dough.swap, ingredient, kindId }, opinion: 'Use it in the dough instead.', tradeoff: 'The shortcakes will be less rich.', siblings: (dough.siblings as { note: string }[]).map((x) => ({ ...x, note: 'The cream in step 6 is whipped, so it stays as written.' })),
+      stepRewrites: [{ stepRef: 'S4', text: `Stir in 130 ML ${ingredient} and 50 g melted butter until just combined.` }] });
+    const same = swapCard('heavy cream', null), SAME = 'SWAP_IS_SAME_INGREDIENT: heavy cream resolves to heavy cream';
+    const ranked = (cs: unknown[]) => ({ cards: SHORTCAKE_CARDS.cards.flatMap((c) => (c.useRef === dough.useRef ? cs : [c])) });
+    const at = (cs: unknown[]) => checkCards(ranked(cs), refsOf(r0), r0, vocab, null).entries.find((e) => e.useId === refsOf(r0).uses[dough.useRef as unknown as string])!;
+    expect(at([same, swapCard('whole milk', 'whole-milk')])).toMatchObject({ status: 'COMPILED', alternates: [{ name: 'heavy cream', reason: SAME }, { name: 'whole milk', reason: null }] });
+    expect(at([same, { ...swapCard('whole milk', 'whole-milk'), siblings: [] }])).toMatchObject({ status: 'INVALID', reason: SAME, alternates: [{ reason: SAME }, { reason: 'SIBLING_MISSED: step 6' }] });
+    expect(at([dough, dough, dough, dough]).reason).toBe('DUPLICATE_CARD');   // more than three for one use is malformed
+    // through the import: the second suggestion is bound, and the first keeps its reason
+    const { auth, saved } = await imported(['shortcake'], Object.fromEntries(Object.entries(rec.cards).map(([k, raw]) => [k, raw === SHORTCAKE_CARDS ? ranked([same, dough]) : raw])));
+    const pack = auth.coverageOf(saved.shortcake.draftId).pack!;
+    const useId = refsOf(pack.recipe).uses[dough.useRef as unknown as string];
+    expect(pack.cards!.find((e) => e.useId === useId)!.alternates).toEqual([{ name: 'heavy cream', reason: SAME }, { name: dough.swap.ingredient, reason: null, used: true }]);
+    expect(pack.bindings.some((b) => b.card && b.targetUseId === useId)).toBe(true);
+    // only the same ingredient under another name was suggested: no alternative was drafted, so "no alternative found"
+    const only = await imported(['shortcake'], Object.fromEntries(Object.entries(rec.cards).map(([k, raw]) => [k, raw === SHORTCAKE_CARDS ? ranked([same]) : raw])));
+    const p2 = only.auth.coverageOf(only.saved.shortcake.draftId).pack!, u2 = refsOf(p2.recipe).uses[dough.useRef as unknown as string];
+    const a2 = only.auth.wireDraft(only.saved.shortcake.draftId).content!.ingredients.flatMap((g) => g.uses).find((x) => x.id === u2)!.analysis!;
+    expect(a2).toMatchObject({ status: 'evaluatedNoOption', reason: { code: 'sameIngredient', text: expect.stringMatching(/^The import analysis suggested heavy cream, which is the cream under another name, so there’s no alternative to offer here\./) } });
+  });
+  it('normalization: only meaning-preserving repairs, each named; contradictory forms still fail', () => {
+    const omitSalt = SHORTCAKE_CARDS.cards[3] as Record<string, unknown>;
+    const { swap: _drop, ...noSwapField } = omitSalt;
+    expect(reasonFor(noSwapField)).toMatchObject({ status: 'COMPILED', normalized: ['absent swap read as null ("omit" card)'] });
+    expect(reasonFor({ ...omitSalt, siblings: [{ useRef: 'U4', handling: 'coveredBy', note: 'The salt in step 2.' }] })).toMatchObject({ status: 'COMPILED', normalized: ['own use U4 dropped from its siblings'] });
+    expect(reasonFor({ ...omitSalt, siblings: [{ useRef: 'U1', handling: 'unchanged', note: 'The flour stays.' }] })).toMatchObject({ status: 'COMPILED', normalized: ['U1 (another ingredient, "unchanged") dropped from the siblings'] });
+    expect(reasonFor({ ...omitSalt, siblings: [{ useRef: 'U4', handling: 'cantCover', note: 'The salt in step 2.' }] }).reason).toBe('SIBLING_NOT_SAME_INGREDIENT: U4');
+    expect(reasonFor({ ...omitSalt, siblings: [{ useRef: 'U1', handling: 'coveredBy', note: 'The flour too.' }] }).reason).toBe('SIBLING_NOT_SAME_INGREDIENT: U1');
+    // the retained live salt card's garbled rewrite ("… and sugar"): a rewrite may not name an ingredient again
+    expect(reasonFor({ ...omitSalt, stepRewrites: [{ stepRef: 'S2', text: 'Whisk 250 g flour, 30 g sugar, 2 tsp baking powder and sugar.' }] }).reason).toBe('REWRITE_EXTRA_INGREDIENT: step 2 names sugar again');
+    const { swap: _s, ...swapWithoutField } = dough;
+    expect(reasonFor(swapWithoutField).reason).toMatch(/^SCHEMA: swap/);                              // a "swap" card without one is not repaired
+  });
   it('a stale-amount rewrite', () => expect(reasonFor({ ...dough, stepRewrites: [{ stepRef: 'S4', text: 'Stir in 130 ML milk and 50 g melted butter, or 180 ML heavy cream, until just combined.' }] }).reason).toMatch(/^STALE_AMOUNT: step 4 untokenized amount "180 ML"/));
   it('an invented alternative in an opinion', () => {
     const whip = SHORTCAKE_CARDS.cards[6];
@@ -266,14 +377,14 @@ describe('protections hold on card plans (same engine)', () => {
   });
 });
 
-describe('practice reset keeps the demo recipes', () => {
-  it('imports listed in demo_recipes survive ⌥⇧R; other imports are cleared', async () => {
+describe('start over', () => {
+  it('archives first, then clears sessions and every import; nothing is restored', async () => {
     const { svc, saved } = await imported(['risotto', 'shortcake']);
-    svc.store.run('INSERT INTO demo_recipes VALUES (?)', saved.risotto.recipeId);
     await cookTo(svc, saved.shortcake.recipeId, 1);
-    svc.demoReset(join(mkdtempSync(join(tmpdir(), 'ccmcp-arch-')), 'a.db'), true);
-    expect(svc.listRecipes().recipes.map((r) => r.recipeId)).toEqual([saved.risotto.recipeId]);
+    const archive = join(mkdtempSync(join(tmpdir(), 'ccmcp-arch-')), 'a.db');
+    svc.startOver(archive);
+    expect(svc.listRecipes().recipes).toEqual([]);                                   // this service lists no examples (fixtureRecipes: false)
     expect(svc.getActiveRecipe().run).toBeNull();
-    expect(svc.startRecipe({ commandId: cmd(), recipeId: saved.risotto.recipeId }).outcome).toBe('started');   // its pack and cards are intact
+    expect(new DatabaseSync(archive, { readOnly: true }).prepare('SELECT COUNT(*) AS n FROM saved_recipes').get()).toEqual({ n: 2 });   // the copy kept both
   });
 });

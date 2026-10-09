@@ -1,12 +1,13 @@
 // CourseCorrect companion: HF v1 Index Card on the reconciled FE–BE contract. The UI computes no culinary facts; every
 // outcome, amount and consequence is rendered from server responses.
-import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
+import { StrictMode, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   activityFrom, activitySince, call, newId, onWebLog, prefs, startActivityScope, web, webEntries,
-  type Active, type ActivityEntry, type RecipeBookEntry, type RecipeContent, type Rejected, type SpeechRef, type WireRun,
+  type Active, type ActivityEntry, type RecipeBookEntry, type RecipeContent, type Rejected, type SourceLine, type SpeechRef, type WireRun,
 } from './api.ts';
 import { Canvas } from './canvas.tsx';
+import { Review, type SourceRef } from './review.tsx';
 import { Cooking, type CookingHandle } from './cooking.tsx';
 import { route, useVoice, type VoiceState } from './voice.ts';
 
@@ -29,23 +30,16 @@ function App() {
   const [actOpen, setActOpen] = useState(false);
   const [speechAvailable, setSpeechAvailable] = useState(false);
   const [speechOn, setSpeechOn] = useState(() => prefs.get('speech') !== 'off');   // on unless this viewer turned it off
-  useEffect(() => { void fetch('/health').then((r) => r.json()).then((h: { speech?: string }) => setSpeechAvailable(h.speech === 'polly')).catch(() => undefined); }, []);
+  useEffect(() => { void fetch('/health').then((r) => r.json()).then((h: { speech?: string }) => { setSpeechAvailable(h.speech === 'polly'); }).catch(() => undefined); }, []);
   const [typed, setTyped] = useState('');
   const [heardText, setHeardText] = useState<string | null>(null);
-  const [resetOpen, setResetOpen] = useState(false);
-  useEffect(() => {   // ⌥⇧R (Option-Shift-R): practice reset. e.code, because Option changes e.key on a Mac
-    const f = (e: KeyboardEvent) => { if (e.altKey && e.shiftKey && e.code === 'KeyR') { e.preventDefault(); setResetOpen(true); } };
-    addEventListener('keydown', f);
-    return () => removeEventListener('keydown', f);
-  }, []);
   const cooking = useRef<CookingHandle | null>(null);
 
   const refresh = useCallback(async () => { const a = await call<Active>('get_active_recipe'); setActive(a); return a; }, []);
   const loadBook = useCallback(async () => { setBook((await call<{ recipes: RecipeBookEntry[] }>('list_recipes')).recipes); }, []);
   useEffect(() => {
-    void Promise.all([refresh(), loadBook()]).then(async ([a]) => {
+    void Promise.all([refresh(), loadBook()]).then(([a]) => {
       if (a.run && sessionStorage.getItem('cc.pendingApply')) setScreen({ kind: 'cooking' });
-      if (sessionStorage.getItem('cc.activityAfterReset')) { sessionStorage.removeItem('cc.activityAfterReset'); await startActivityScope(); }   // blank after a reset
     });
   }, [refresh, loadBook]);
 
@@ -106,7 +100,8 @@ function App() {
 
   const activeTitle = run ? book?.find((b) => b.recipeId === run.recipeId)?.title ?? active?.recipe?.title ?? 'recipe' : null;
   const curOrd = run && active?.recipe ? (active.recipe.steps.find((s) => s.id === run.currentStepId)?.ordinal ?? null) : null;
-  const showAct = wide || actOpen;
+  const strip = screen.kind === 'canvas' || screen.kind === 'page';   // the review screens carry the compact Activity strip (HF Import Review)
+  const showAct = (wide || actOpen) && !strip;
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -115,18 +110,18 @@ function App() {
         <button onClick={goBook} style={{ background: 'none', border: 'none', padding: '4px 0', fontSize: 16, color: 'var(--cc-on-chrome)' }}>Recipe Book</button>
         <div style={{ flex: 1 }} />
         {run && screen.kind !== 'cooking' && <button onClick={async () => { await refresh(); setScreen({ kind: 'cooking' }); }} style={{ background: 'transparent', border: '1.5px solid var(--cc-on-chrome)', borderRadius: 20, padding: '7px 15px', fontSize: 15, fontWeight: 600, color: 'var(--cc-on-chrome)', whiteSpace: 'nowrap' }}>Resume cooking · {activeTitle}{curOrd ? ` · step ${curOrd}` : ''}</button>}
-        {!wide && <button onClick={() => setActOpen(!actOpen)} aria-expanded={actOpen} style={{ background: 'transparent', border: '1.5px solid var(--cc-on-chrome)', borderRadius: 6, padding: '7px 13px', fontSize: 15, color: 'var(--cc-on-chrome)' }}>Activity</button>}
+        {!wide && !strip && <button onClick={() => setActOpen(!actOpen)} aria-expanded={actOpen} style={{ background: 'transparent', border: '1.5px solid var(--cc-on-chrome)', borderRadius: 6, padding: '7px 13px', fontSize: 15, color: 'var(--cc-on-chrome)' }}>Activity</button>}
       </header>
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           {screen.kind === 'book' && <Book book={book} onOpen={(id) => setScreen({ kind: 'page', recipeId: id })} onAdd={() => setSheet({ step: 'pdf' })} />}
-          {screen.kind === 'page' && <RecipePage recipeId={screen.recipeId} savedOpen={screen.savedOpen ?? null} active={active} activeTitle={activeTitle}
-            onCanvas={(draftId) => setScreen({ kind: 'canvas', draftId, jobId: null })} onStart={startRecipe} onResume={async () => { await refresh(); setScreen({ kind: 'cooking' }); }} />}
+          {screen.kind === 'page' && <RecipePage key={screen.recipeId} wide={wide} activity={<ActivityStrip />} recipeId={screen.recipeId} savedOpen={screen.savedOpen ?? null} active={active} activeTitle={activeTitle}
+            onCanvas={(draftId) => setScreen({ kind: 'canvas', draftId, jobId: null })} onRemoved={goBook} onStart={startRecipe} onResume={async () => { await refresh(); setScreen({ kind: 'cooking' }); }} />}
           {screen.kind === 'canvas' && <Canvas key={screen.draftId} draftId={screen.draftId} jobId={screen.jobId} wide={wide}
-            onSaved={(recipeId, open) => { void loadBook(); setScreen({ kind: 'page', recipeId, savedOpen: open }); }} onPage={(recipeId) => setScreen({ kind: 'page', recipeId })} />}
+            onSaved={(recipeId, open) => { void loadBook(); setScreen({ kind: 'page', recipeId, savedOpen: open }); }} onPage={(recipeId) => setScreen({ kind: 'page', recipeId })} activity={<ActivityStrip />} />}
           {screen.kind === 'cooking' && active && (
             <Cooking active={active} setActive={setActive} refresh={refresh} speak={speak} handleRef={cooking} wide={wide}
-              onLeave={goBook} voiceBar={<VoiceBar state={voice.state} supported={voice.supported} lastSpoken={voice.lastSpoken?.text ?? null}
+              onLeave={goBook} voiceBar={<VoiceBar state={voice.state} supported={voice.supported} lastSpoken={voice.lastSpoken?.text ?? null} audio={voice.audio}
                 onMic={() => (voice.state.kind === 'listening' ? voice.stop() : voice.start())} onStopSpeaking={voice.stopSpeaking} onRepeat={voice.repeat}
                 typed={typed} setTyped={(t) => { cancelAuto(); setTyped(t); if (voice.state.kind === 'heard' || voice.state.kind === 'clarify') voice.setState({ kind: 'ready' }); }} onSend={send}
                 onCancelHeard={() => { cancelAuto(); setTyped(''); setHeardText(null); voice.setState({ kind: 'stopped' }); }}
@@ -135,7 +130,6 @@ function App() {
         </main>
         {showAct && <Activity wide={wide} onClose={() => setActOpen(false)} />}
       </div>
-      {resetOpen && <ResetDialog onClose={() => setResetOpen(false)} />}
       {sheet && <SheetView sheet={sheet} setSheet={setSheet} run={run} activeTitle={activeTitle} curOrd={curOrd}
         onImported={(draftId, jobId) => { setSheet(null); setScreen({ kind: 'canvas', draftId, jobId }); }}
         onResume={async () => { setSheet(null); await refresh(); setScreen({ kind: 'cooking' }); }}
@@ -175,12 +169,16 @@ function Book({ book, onOpen, onAdd }: { book: RecipeBookEntry[] | null; onOpen:
   );
 }
 
-// ---------- Saved recipe page ----------
-interface RecipeVersionView { version: { id: string; recipeId: string; createdFromDraft: string | null; content: RecipeContent | null; release: RecipeBookEntry['release'] }; sources: { displayName: string; pageCount: number | null }[] }
-function RecipePage({ recipeId, savedOpen, active, activeTitle, onCanvas, onStart, onResume }: {
-  recipeId: string; savedOpen: string[] | null; active: Active | null; activeTitle: string | null;
-  onCanvas: (draftId: string) => void; onStart: (to: { recipeId: string; versionId: string; title: string }) => Promise<string | null>; onResume: () => void;
+// ---------- Saved recipe page: the same review as at import, plus cooking ----------
+interface RecipeVersionView {
+  version: { id: string; recipeId: string; createdFromDraft: string | null; content: RecipeContent | null; release: RecipeBookEntry['release'] };
+  sources: { displayName: string; pageCount: number | null }[]; sourceLines?: SourceLine[]; sourceRefs?: Record<string, SourceRef | null>;
+}
+function RecipePage({ recipeId, savedOpen, active, activeTitle, onCanvas, onStart, onResume, onRemoved, wide, activity }: {
+  recipeId: string; savedOpen: string[] | null; active: Active | null; activeTitle: string | null; wide: boolean; activity: ReactNode;
+  onCanvas: (draftId: string) => void; onStart: (to: { recipeId: string; versionId: string; title: string }) => Promise<string | null>; onResume: () => void; onRemoved: () => void;
 }) {
+  const [removing, setRemoving] = useState(false);
   const [v, setV] = useState<RecipeVersionView | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -189,45 +187,46 @@ function RecipePage({ recipeId, savedOpen, active, activeTitle, onCanvas, onStar
   const c = v.version.content, rel = v.version.release;
   const thisCooking = active?.run?.recipeId === recipeId, other = active?.run && !thisCooking;
   const src = v.sources[0];
-  return (
-    <div className="scroll" style={{ flex: 1, padding: '32px 48px 48px' }}>
-      <div style={{ maxWidth: 1120, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 22 }}>
-        {savedOpen && <div role="status" className="card in" style={{ border: '2px solid var(--cc-text)', fontSize: 18, fontWeight: 700, display: 'block' }}>
-          {rel.kind === 'eligible' ? 'Saved to your Recipe Book. You can start cooking.' : 'Saved to your Recipe Book. It can’t start yet.'}
-          {savedOpen.length > 0 && <span style={{ fontWeight: 400 }}> Still open: {savedOpen.join(' ')}</span>}</div>}
-        <div style={{ display: 'flex', gap: 24, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          <div style={{ flex: 1, minWidth: 300, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <span className={`tag${rel.kind === 'eligible' ? '' : ' att'}`}>{rel.kind === 'eligible' ? 'Saved · can start' : 'Saved · can’t start yet'}</span>
-            <h1 style={{ fontSize: 36 }}>{c?.title ?? 'Recipe'}</h1>
-            <span className="muted" style={{ fontSize: 16 }}>{c?.meta}{src ? ` · from ${src.displayName}` : ' · demo recipe (engineering content)'}
-              {v.version.createdFromDraft && <> · <button className="link" style={{ fontSize: 16 }} onClick={() => onCanvas(v.version.createdFromDraft!)}>See how it was read</button></>}</span>
-            {rel.kind === 'eligible' && <span style={{ fontSize: 16 }}>{rel.coverageSummary}</span>}
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', maxWidth: 360 }}>
-            {thisCooking && <button className="b primary big" onClick={onResume}>Resume cooking</button>}
-            {!thisCooking && rel.kind === 'eligible' && <button className="b primary big" disabled={busy} onClick={async () => { setBusy(true); setErr(await onStart({ recipeId, versionId: v.version.id, title: c?.title ?? 'this recipe' })); setBusy(false); }}>Start cooking</button>}
-            {rel.kind === 'ineligible' && <><button className="b big" disabled>Start cooking</button>
-              <span style={{ fontSize: 15, textAlign: 'right' }}>Can’t start yet: {rel.reasons[0]?.message}</span>
-              {v.version.createdFromDraft && rel.reasons[0]?.nextAction && <button className="b strong" onClick={() => onCanvas(v.version.createdFromDraft!)}>{rel.reasons[0].nextAction}</button>}</>}
-            {other && <span className="muted" style={{ fontSize: 14, textAlign: 'right' }}>You’re cooking {activeTitle}. Starting asks first.</span>}
-            {err && <span role="alert" className="attention" style={{ fontSize: 15 }}>{err}</span>}
-          </div>
-        </div>
-        {c && <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1.8fr)', gap: 40 }}>
-          <section><h2 className="eyebrow" style={{ fontFamily: 'inherit', marginBottom: 8 }}>Ingredients</h2>
-            {c.ingredients.map((g) => <div key={g.id} style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: '10px 0', borderBottom: '1px solid var(--cc-border)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 18 }}><span>{g.name}</span><strong style={{ textAlign: 'right' }}>{g.totalAmount.display ?? ''}</strong></div>
-              <span className="muted" style={{ fontSize: 14 }}>{g.uses.length ? g.uses.map((u) => `step ${c.steps.find((s) => s.id === u.stepId)?.ordinal}`).join(', ') : 'No use found'}</span></div>)}
-          </section>
-          <section><h2 className="eyebrow" style={{ fontFamily: 'inherit', marginBottom: 8 }}>Steps</h2>
-            {c.steps.map((q) => <div key={q.id} style={{ display: 'grid', gridTemplateColumns: '34px minmax(0,1fr)', gap: 10, padding: '12px 0', borderBottom: '1px solid var(--cc-border)' }}>
-              <strong style={{ fontSize: 19 }}>{q.ordinal}</strong><div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}><span style={{ fontWeight: 700, fontSize: 17 }}>{q.title}</span><span style={{ fontSize: 18, lineHeight: 1.45 }}>{q.text}</span></div></div>)}
-            {rel.kind === 'ineligible' && <div className="attention" style={{ marginTop: 10, fontSize: 17, fontWeight: 700 }}>{rel.reasons.map((r) => r.message).join(' ')}</div>}
-          </section>
-        </div>}
+  const bar = (
+    <div style={{ flex: 'none', padding: '12px 22px', borderBottom: '1px solid var(--cc-border)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {savedOpen && <div role="status" className="card in" style={{ border: '2px solid var(--cc-text)', fontSize: 18, fontWeight: 700, display: 'block', padding: '10px 14px' }}>
+        {rel.kind === 'eligible' ? 'Saved to your Recipe Book. You can start cooking.' : 'Saved to your Recipe Book. It can’t start yet.'}
+        {savedOpen.length > 0 && <span style={{ fontWeight: 400 }}> Still open: {savedOpen.join(' ')}</span>}</div>}
+      <div style={{ display: 'flex', gap: '10px 20px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className={`tag${rel.kind === 'eligible' ? '' : ' att'}`} style={{ alignSelf: 'center' }}>{rel.kind === 'eligible' ? 'Saved · can start' : 'Saved · can’t start yet'}</span>
+        <span style={{ flex: 1, minWidth: 240, fontSize: 15 }}>{rel.kind === 'eligible' ? rel.coverageSummary : rel.reasons[0]?.message}{!src && ' · demo recipe (engineering content)'}
+          {v.version.createdFromDraft && <> · <button className="link" onClick={() => onCanvas(v.version.createdFromDraft!)}>See how it was read</button></>}</span>
+        {other && <span className="muted" style={{ fontSize: 14 }}>You’re cooking {activeTitle}. Starting asks first.</span>}
+        {/* archive through the delete_recipe MCP tool: off the book, history kept; refused by the server while it is being cooked */}
+        {!thisCooking && !removing && <button className="link" onClick={() => setRemoving(true)}>Remove from Recipe Book</button>}
+        {thisCooking && <button className="b primary" onClick={onResume}>Resume cooking</button>}
+        {!thisCooking && rel.kind === 'eligible' && <button className="b primary" disabled={busy} onClick={async () => { setBusy(true); setErr(await onStart({ recipeId, versionId: v.version.id, title: c?.title ?? 'this recipe' })); setBusy(false); }}>Start cooking</button>}
+        {rel.kind === 'ineligible' && <><button className="b" disabled>Start cooking</button>
+          {v.version.createdFromDraft && rel.reasons[0]?.nextAction && <button className="b strong" onClick={() => onCanvas(v.version.createdFromDraft!)}>{rel.reasons[0].nextAction}</button>}</>}
       </div>
+      {rel.kind === 'ineligible' && <span style={{ fontSize: 15 }}>Can’t start yet: {rel.reasons.map((r) => r.message).join(' ')}</span>}
+      {err && <span role="alert" className="attention" style={{ fontSize: 15 }}>{err}</span>}
+      {!thisCooking && removing && <div role="group" aria-label="Remove from Recipe Book" className="card" style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 15 }}>
+        <span>Remove “{c?.title ?? 'this recipe'}” from your Recipe Book? It is archived, not erased: past cooking sessions are kept.</span>
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+          <button className="link" disabled={busy} onClick={() => setRemoving(false)}>Keep it</button>
+          <button className="b" disabled={busy} onClick={async () => {
+            setBusy(true); setErr(null);
+            try {
+              const entry = (await call<{ recipes: RecipeBookEntry[] }>('list_recipes')).recipes.find((x) => x.recipeId === recipeId);
+              if (!entry) { setErr('This recipe is no longer in your Recipe Book.'); return; }
+              const out = await call<{ outcome: string; message?: string }>('delete_recipe', { commandId: newId(), recipeId, recipeVersionId: entry.currentVersionId, confirm: true });
+              if (out.outcome === 'archived') onRemoved(); else { setErr(out.message ?? 'It wasn’t removed.'); setRemoving(false); }
+            } catch { setErr('No response from CourseCorrect. Check the Recipe Book before trying again.'); }
+            finally { setBusy(false); }
+          }}>Remove</button>
+        </div></div>}
     </div>
   );
+  return <div data-testid="recipe-page" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    {bar}
+    {c ? <Review content={c} sourceLines={v.sourceLines ?? []} sourceName={src?.displayName ?? null} sourceRefs={v.sourceRefs ?? {}} wide={wide} footer={activity} /> : <div className="muted" style={{ flex: 1, padding: 24 }}>This version has no readable content.</div>}
+  </div>;
 }
 
 // ---------- Add sheet (modal) and switch-session confirmation ----------
@@ -241,6 +240,7 @@ function SheetView({ sheet, setSheet, run, activeTitle, curOrd, onImported, onRe
   const [reading, setReading] = useState(false);
   const [drag, setDrag] = useState(false);
   const key = useRef(newId());
+  const uploaded = useRef<{ key: string; file: File; sourceDocId: string } | null>(null);   // a retry reuses the same upload and command
   const box = useRef<HTMLDivElement>(null);
   const opener = useRef(document.activeElement as HTMLElement | null);
   useEffect(() => { box.current?.querySelector<HTMLElement>('button,input,textarea')?.focus(); }, [sheet.step]);
@@ -260,21 +260,30 @@ function SheetView({ sheet, setSheet, run, activeTitle, curOrd, onImported, onRe
     if (f.type !== 'application/pdf' && !f.name.toLowerCase().endsWith('.pdf')) { setErr('That file isn’t a PDF. Choose a PDF, or paste the recipe text.'); return; }
     setFile(f); key.current = newId();
   };
-  /** Upload, then wait until the reading either fails (error here, input kept) or returns a recipe (open the canvas). */
+  /**
+   * A PDF is uploaded (web request; nothing is read yet), then the import itself is the import_recipe MCP tool, so it shows
+   * in Activity like any agent's call. Pasted text goes straight to the tool. The draft is never saved here.
+   */
   const submit = async (body: Blob | { kind: 'text'; text: string }, headers: Record<string, string>) => {
     setReading(true); setErr(null);
     await startActivityScope();
     try {
-      const r = await web<{ job?: { id: string; state: string; stagesCompleted: string[]; failure: { message: string } | null }; draftId?: string; error?: { message: string } }>('POST', '/imports', body, { 'idempotency-key': key.current, ...headers }, 'Upload and read');
-      if (r.status !== 202 || !r.data.job) { setErr(r.data.error?.message ?? 'That couldn’t be read.'); return; }
-      let job = r.data.job;
-      while (job.state === 'running' || job.state === 'queued') {
-        if (job.stagesCompleted.length > 1) break;
-        await new Promise((res) => setTimeout(res, 300));
-        job = (await web<{ job: typeof job }>('GET', `/imports/${job.id}`)).data.job;
-      }
-      if (job.state === 'failed') { setErr(job.failure?.message ?? 'We couldn’t find a recipe in that document.'); key.current = newId(); return; }
-      onImported(r.data.draftId!, job.id);
+      let source: { kind: 'upload'; sourceDocId: string } | { kind: 'text'; text: string };
+      if (body instanceof Blob) {
+        if (uploaded.current?.key !== key.current || uploaded.current.file !== body) {
+          const u = await web<{ sourceDocId?: string; error?: { message: string } }>('POST', '/uploads', body, headers, 'Upload');
+          if (u.status !== 201 || !u.data.sourceDocId) { setErr(u.data.error?.message ?? 'That couldn’t be read.'); return; }
+          uploaded.current = { key: key.current, file: body as File, sourceDocId: u.data.sourceDocId };
+        }
+        source = { kind: 'upload', sourceDocId: uploaded.current.sourceDocId };
+      } else source = body;
+      type Imported = { outcome: 'imported' | 'importing' | 'failed' | 'rejected'; message?: string; job?: { id: string; failure: { message: string } | null }; draft?: { draftId: string } | null };
+      let r: Imported;
+      try { r = await call<Imported>('import_recipe', { commandId: key.current, source }); }
+      catch { setErr('No response from CourseCorrect. Try again; the same request is reused, so nothing is read twice.'); return; }
+      if (r.outcome === 'rejected') { setErr(r.message ?? 'That couldn’t be read.'); key.current = newId(); return; }
+      if (r.outcome === 'failed' || !r.job || !r.draft) { setErr(r.job?.failure?.message ?? 'We couldn’t find a recipe in that document.'); key.current = newId(); return; }
+      onImported(r.draft.draftId, r.job.id);
     } finally { setReading(false); }
   };
   const title = sheet.step === 'switch' ? 'Start a different recipe?' : sheet.step === 'paste' ? 'Paste recipe text' : 'Add a recipe';
@@ -313,35 +322,12 @@ function SheetView({ sheet, setSheet, run, activeTitle, curOrd, onImported, onRe
   );
 }
 
-// ---------- practice reset (⌥⇧R) ----------
-function ResetDialog({ onClose }: { onClose: () => void }) {
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const reset = async () => {
-    setBusy(true); setErr(null);
-    const r = await fetch('/admin/demo-reset', { method: 'POST' });
-    if (!r.ok) { setBusy(false); setErr(((await r.json().catch(() => null)) as { error?: { message?: string } } | null)?.error?.message ?? `Reset failed (${r.status})`); return; }
-    try { sessionStorage.removeItem('cc.pendingApply'); sessionStorage.removeItem('cc.activityFrom'); sessionStorage.setItem('cc.activityAfterReset', '1'); } catch { /* reload still resets the view */ }
-    location.href = '/';
-  };
-  return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(42,33,27,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 40 }} onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}>
-      <div role="dialog" aria-modal="true" aria-label="Reset demo" className="card in" style={{ width: 460, padding: '22px 24px', gap: 12 }}>
-        <h2 style={{ fontSize: 24 }}>Reset demo?</h2>
-        <span style={{ fontSize: 16 }}>Clears cooking sessions, proposals, imported recipes and the Activity column, and returns to the Recipe Book. A copy of the current data is saved first.</span>
-        {err && <span role="alert" className="attention">{err}</span>}
-        <div style={{ display: 'flex', gap: 8 }}><button className="b primary" autoFocus disabled={busy} onClick={() => void reset()}>Reset</button><button className="b" onClick={onClose}>Cancel</button></div>
-      </div>
-    </div>
-  );
-}
-
 // ---------- Activity (server-recorded MCP calls + this browser's web requests) ----------
 const PILL: Record<string, string> = { ok: 'OK', needsFact: 'Needs a fact', proposed: 'Proposed', refused: 'Refused', failed: 'Rejected', unknown: 'Unknown', applied: 'Applied' };
-function Activity({ wide, onClose }: { wide: boolean; onClose: () => void }) {
+/** Server-recorded MCP calls (any client) since this view's scope began, newest first, plus this tab's web requests. */
+function useActivity() {
   const [mcp, setMcp] = useState<ActivityEntry[]>([]);
   const [webLog, setWebLog] = useState(webEntries().slice());
-  const [open, setOpen] = useState<number | null>(null);
   const [flash, setFlash] = useState<number | null>(null);
   useEffect(() => onWebLog(() => setWebLog(webEntries().slice())), []);
   useEffect(() => {
@@ -355,6 +341,37 @@ function Activity({ wide, onClose }: { wide: boolean; onClose: () => void }) {
     const t = window.setInterval(() => void tick(), 1200);
     return () => { alive = false; window.clearInterval(t); };
   }, []);
+  return { mcp: mcp.filter((e) => e.seq > activityFrom()), webLog, flash };
+}
+
+/** Import screens (HF Import Review): one line, expandable; real requests only (web from this tab, MCP from the server). */
+function ActivityStrip() {
+  const { mcp, webLog } = useActivity();
+  const [open, setOpen] = useState(false);
+  const rows = [...mcp.map((e) => ({ key: `m${e.seq}`, at: e.at, mcp: true, n: e.seq, name: e.name, detail: e.summary, status: PILL[e.status] ?? e.status })),
+    ...webLog.map((e) => ({ key: `w${e.seq}`, at: e.at, mcp: false, n: e.seq, name: e.name, detail: e.input, status: e.result }))].sort((a, b) => b.at.localeCompare(a.at));
+  const latest = rows[0];
+  return <section aria-label="Activity" style={{ flex: 'none', borderTop: '1px solid var(--cc-border)', background: 'var(--cc-surface-2)' }}>
+    {open && <div className="scroll" style={{ maxHeight: 170, padding: '8px 22px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {rows.length === 0 && <span className="muted" style={{ fontSize: 13 }}>No requests yet.</span>}
+      {rows.map((e) => <div key={e.key} data-testid={e.mcp ? 'activity-entry' : 'activity-web'} style={{ display: 'grid', gridTemplateColumns: '40px 50px minmax(160px,auto) minmax(0,1fr) auto', gap: 10, fontSize: 13, alignItems: 'baseline' }}>
+        <span className="muted">#{e.n}</span>
+        <span style={{ border: `1px ${e.mcp ? 'solid var(--cc-text)' : 'dashed var(--cc-border-strong)'}`, borderRadius: 3, padding: '0 4px', textAlign: 'center', fontWeight: e.mcp ? 700 : 400 }}>{e.mcp ? 'MCP' : 'web'}</span>
+        <strong>{e.name}</strong><span style={{ overflowWrap: 'anywhere' }}>{e.detail}</span><span className="muted">{e.status}</span>
+      </div>)}
+    </div>}
+    <button onClick={() => setOpen(!open)} aria-expanded={open} style={{ width: '100%', display: 'flex', gap: 12, alignItems: 'center', padding: '6px 22px', border: 'none', borderTop: open ? '1px solid var(--cc-border)' : 'none', background: 'var(--cc-surface-2)', textAlign: 'left' }}>
+      <strong style={{ fontSize: 13 }}>Activity</strong>
+      <span className="muted" style={{ fontSize: 13 }}>{webLog.length} web request{webLog.length === 1 ? '' : 's'} · {mcp.length} MCP call{mcp.length === 1 ? '' : 's'}</span>
+      <span style={{ flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Latest: {latest ? `${latest.name} · ${latest.status}` : 'none yet'}</span>
+      <span style={{ fontSize: 13, textDecoration: 'underline' }}>{open ? 'Hide' : 'Show history'}</span>
+    </button>
+  </section>;
+}
+
+function Activity({ wide, onClose }: { wide: boolean; onClose: () => void }) {
+  const { mcp: shown, webLog, flash } = useActivity();
+  const [open, setOpen] = useState<number | null>(null);
   return (
     <aside aria-label="Activity" style={{ flex: '0 0 300px', borderLeft: '1px solid var(--cc-border)', background: 'var(--cc-surface-2)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--cc-border)', display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -362,8 +379,8 @@ function Activity({ wide, onClose }: { wide: boolean; onClose: () => void }) {
         <span className="muted" style={{ fontSize: 13, lineHeight: 1.4 }}>MCP tool calls recorded by the server, from any client (this companion or an agent). Newest first.</span>
       </div>
       <div className="scroll" style={{ flex: 1, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 7 }}>
-        {mcp.filter((e) => e.seq > activityFrom()).length === 0 && <span className="muted" style={{ fontSize: 14 }}>No MCP calls yet.</span>}
-        {mcp.filter((e) => e.seq > activityFrom()).map((e) => (
+        {shown.length === 0 && <span className="muted" style={{ fontSize: 14 }}>No MCP calls yet.</span>}
+        {shown.map((e) => (
           <div key={e.seq} style={{ display: 'flex', flexDirection: 'column' }}>
             <button onClick={() => setOpen(open === e.seq ? null : e.seq)} aria-expanded={open === e.seq} data-testid="activity-entry"
               style={{ background: 'var(--cc-surface)', border: flash === e.seq ? '2px solid var(--cc-proposed)' : '1px solid var(--cc-border)', borderRadius: 8, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 4, textAlign: 'left', animation: flash === e.seq ? 'ccFlash 2.4s ease-out' : undefined }}>
@@ -391,9 +408,24 @@ function Activity({ wide, onClose }: { wide: boolean; onClose: () => void }) {
 }
 
 // ---------- Voice bar ----------
+/** The reply being spoken, two lines tall: it scrolls with the audio, so the bar never grows with the reply. */
+function SpokenText({ text, audio }: { text: string; audio: { current: HTMLAudioElement | null } }) {
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    let raf = 0;
+    const follow = () => {
+      const el = box.current, a = audio.current;
+      if (el && a && a.duration > 0) el.scrollTop = (a.currentTime / a.duration) * (el.scrollHeight - el.clientHeight);
+      raf = requestAnimationFrame(follow);
+    };
+    raf = requestAnimationFrame(follow);
+    return () => cancelAnimationFrame(raf);
+  }, [text, audio]);
+  return <div ref={box} data-testid="spoken-text" style={{ fontSize: 17, lineHeight: 1.35, maxHeight: '2.7em', overflow: 'hidden' }}>{text}</div>;
+}
 const AUTO_SEND_MS = 2000;
-function VoiceBar({ state, supported, lastSpoken, onMic, onStopSpeaking, onRepeat, typed, setTyped, onSend, onCancelHeard, speechOn, speechAvailable, setSpeechOn }: {
-  state: VoiceState; supported: boolean; lastSpoken: string | null; onMic: () => void; onStopSpeaking: () => void; onRepeat: () => void;
+function VoiceBar({ state, supported, lastSpoken, audio, onMic, onStopSpeaking, onRepeat, typed, setTyped, onSend, onCancelHeard, speechOn, speechAvailable, setSpeechOn }: {
+  state: VoiceState; supported: boolean; lastSpoken: string | null; audio: { current: HTMLAudioElement | null }; onMic: () => void; onStopSpeaking: () => void; onRepeat: () => void;
   typed: string; setTyped: (t: string) => void; onSend: () => void; onCancelHeard: () => void; speechOn: boolean; speechAvailable: boolean; setSpeechOn: (v: boolean) => void;
 }) {
   const listening = state.kind === 'listening';
@@ -413,7 +445,7 @@ function VoiceBar({ state, supported, lastSpoken, onMic, onStopSpeaking, onRepea
           <span style={{ fontSize: 19, fontWeight: 600 }}>{state.interim ? `“${state.interim}”` : <span className="muted" style={{ fontSize: 15, fontWeight: 400 }}>Speak now. Tap the mic again to stop.</span>}</span></>}
         {state.kind === 'heard' && <><span className="muted" style={{ fontSize: 15 }}>Heard · sending in a moment · edit the text or Cancel to stop</span>
           <span style={{ fontSize: 19, fontWeight: 600, display: 'flex', gap: 10, alignItems: 'baseline' }}>“{state.text}” <button className="b sm" onClick={onCancelHeard}>Cancel</button></span></>}
-        {state.kind === 'speaking' && <><span style={{ fontSize: 14, fontWeight: 700, color: 'var(--cc-speaking)', letterSpacing: '.04em', textTransform: 'uppercase' }}>CourseCorrect is saying</span><span style={{ fontSize: 17, lineHeight: 1.35 }}>{state.text}</span></>}
+        {state.kind === 'speaking' && <><span style={{ fontSize: 14, fontWeight: 700, color: 'var(--cc-speaking)', letterSpacing: '.04em', textTransform: 'uppercase' }}>CourseCorrect is saying</span><SpokenText text={state.text} audio={audio} /></>}
         {state.kind === 'clarify' && <><span style={{ fontSize: 14, fontWeight: 700, color: 'var(--cc-attention)', letterSpacing: '.04em', textTransform: 'uppercase' }}>Needs clarification</span><span style={{ fontSize: 18, fontWeight: 700 }}>{state.message}</span></>}
         {state.kind === 'info' && <><span style={{ fontSize: 14, fontWeight: 700, color: 'var(--cc-speaking)', letterSpacing: '.04em', textTransform: 'uppercase' }}>One more</span><span style={{ fontSize: 18, fontWeight: 700 }}>{state.message}</span></>}
         {state.kind === 'stopped' && <><span style={{ fontSize: 18, fontWeight: 700 }}>Stopped listening</span><span className="muted" style={{ fontSize: 15 }}>Nothing was sent.</span></>}

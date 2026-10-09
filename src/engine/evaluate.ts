@@ -6,7 +6,7 @@ import {
   type Requirement, type RescueRequest, type RoleRow, type RunSnapshot, type StepChange, type Target, type TraceCheck,
   type Vocabulary,
 } from '../contract/types.ts';
-import { add, canonicalJson, hash, type Rational } from '../domain/rational.ts';
+import { add, canonicalJson, formatRational, hash, type Rational } from '../domain/rational.ts';
 import {
   amountDisplay, currentStepId, getIngredient, getStep, getUse, lowerFirst, qtyText, renderStep, stepOrder, upperFirst,
   useLabel, validateStructure,
@@ -31,7 +31,19 @@ const fnLabel = (v: Vocabulary, u: IngredientUse, fid: Id) => u.functions.find((
 const fnLabels = (v: Vocabulary, u: IngredientUse) => u.functions.map((f) => f.label ?? functionLabel(v, f.functionId));
 
 // ---------- requirements and availability ----------
-function requirementsFor(before: Recipe, after: Recipe, snap: RunSnapshot): Requirement[] {
+/** A requirement's purpose at a step, from the step's technique label (never its title): "mix dough" → "for the dough",
+ *  "brush" → "for brushing", "rub in" → "for rubbing in". Anything else names the step. */
+function purposeOf(v: Vocabulary, r: Recipe, stepId: Id): { purpose: string; noun: string | null } {
+  const t = getStep(r, stepId)?.technique, label = t ? v.techniques.find((x) => x.techniqueId === t.techniqueId)?.label : undefined;
+  const w = label?.toLowerCase().split(/\s+/) ?? [];
+  const ing = (x: string) => (/^[^aeiou]*[aeiou][bdgmnprt]$/.test(x) ? `${x}${x.slice(-1)}ing` : x.endsWith('e') && !x.endsWith('ee') ? `${x.slice(0, -1)}ing` : `${x}ing`);
+  if (w.length === 1) return { purpose: `for ${ing(w[0])}`, noun: null };
+  if (w.length === 2 && ['in', 'up', 'out', 'off'].includes(w[1])) return { purpose: `for ${ing(w[0])} ${w[1]}`, noun: null };
+  if (w.length === 2) return { purpose: `for the ${w[1]}`, noun: `the ${w[1]}` };
+  return { purpose: `for step ${stepOrder(r, stepId)}`, noun: null };   // ponytail: longer labels name the step
+}
+
+function requirementsFor(before: Recipe, after: Recipe, snap: RunSnapshot, v: Vocabulary): Requirement[] {
   const beforeIds = new Set(before.uses.map((u) => u.useId)), afterIds = new Set(after.uses.map((u) => u.useId));
   const fresh = after.uses.filter((u) => u.kind === 'ADD' && !beforeIds.has(u.useId));
   const out: Requirement[] = [];
@@ -51,9 +63,16 @@ function requirementsFor(before: Recipe, after: Recipe, snap: RunSnapshot): Requ
         && (snap.useStatus[u.useId] ?? 'UNADDED') !== 'ADDED' && u.amount.kind === 'EXACT' && u.amount.unit === unit);
       const reserved = reservedUses.reduce<Rational>((a, u) => add(a, (u.amount as { value: Rational }).value), { n: 0, d: 1 });
       const prep = exact[0].prepNote;
-      const display = `${qtyText(base, unit)}${reservedUses.length ? ' more' : ''} ${[prep, name].filter(Boolean).join(' ')}`
-        + (upTo.n ? `, plus up to ${qtyText(upTo, unit)} more only if needed` : '');
+      // one question per ingredient. When its stated amounts serve several steps: the total including any conditional extra,
+      // then each use by purpose and the extra apart ("225 ML milk: 180 ML for the dough (step 3) + 15 ML for brushing (step 6)
+      // + up to 30 ML extra for the dough, only if needed")
+      const parts = exact.length > 1 ? exact.map((u) => ({ qty: (u.amount as { value: Rational }).value, ...purposeOf(v, after, u.stepId), order: stepOrder(after, u.stepId), upTo: u.allowance?.max ?? null })) : undefined;
+      const extra = parts?.find((x) => x.upTo);
+      const display = parts
+        ? `${qtyText(add(base, upTo), unit)}${reservedUses.length ? ' more' : ''} ${[prep, name].filter(Boolean).join(' ')}: ${parts.map((x) => `${qtyText(x.qty, unit)} ${x.purpose} (step ${x.order})`).join(' + ')}${extra ? ` + up to ${qtyText(upTo, unit)} extra ${extra.purpose}, only if needed` : ''}`
+        : `${exact.length === 1 && !reservedUses.length ? amountDisplay(exact[0].amount) : qtyText(base, unit)}${reservedUses.length ? ' more' : ''} ${[prep, name].filter(Boolean).join(' ')}` + (upTo.n ? `, plus up to ${qtyText(upTo, unit)} more only if needed` : '');
       out.push({
+        ...(parts ? { parts } : {}),
         ingredientId: ingId, name, qty: add(base, upTo), unit, display,
         forSteps: [...new Set(exact.map((u) => u.stepId))].map((stepId) => ({ stepId, order: stepOrder(after, stepId) })),
         includesUpTo: upTo.n ? upTo : null,
@@ -220,7 +239,7 @@ export function evaluateBinding(b: Binding, snap: RunSnapshot, v: Vocabulary, an
   if (errs.length) return refuse('RESULT_VALIDATION', 'resulting recipe valid', 'NOT_APPLICABLE_NOW', errs.join('; '));
   ok('RESULT_VALIDATION', 'resulting recipe valid');
 
-  const reqs = requirementsFor(r, after, snap);
+  const reqs = requirementsFor(r, after, snap, v);
   const candidate = buildCandidate(b, snap, after, resumeStepId, reqs, v, packHash);
   const qs = questionsFor(b.bindingId, reqs, after);
   const answerOf = (q: Question) => (answers === 'ASSUME_ENOUGH' ? 'ENOUGH' : answers.get(q.questionId) ?? 'UNKNOWN');
@@ -352,7 +371,7 @@ export function evaluate(pack: RecipePack, v: Vocabulary, snap: RunSnapshot, req
   const P = pc.classes;
   // an exact proposal match first; a refusal with no classes (an import card's "no") refuses any replacement (ENGINE_SEMANTICS 3)
   const refuser = (P.length ? B.find((b) => b.kind === 'REFUSAL' && b.refusal!.classes.length > 0 && sameSet(b.refusal!.classes, P)) : undefined)
-    ?? B.find((b) => b.kind === 'REFUSAL' && b.refusal!.classes.length === 0);
+    ?? B.find((b) => b.kind === 'REFUSAL' && b.refusal!.classes.length === 0 && !b.refusal!.omission);   // "can't be left out" refuses no replacement
 
   const outcomes = B.filter((b) => b.kind === 'RECOVERY').map((b) => {
     const answers = new Map(req.answers.map((a) => [a.questionId, a.choiceId] as const));
@@ -409,7 +428,25 @@ function speechFor(res: Omit<EvaluationResult, 'speech'>): string {
   if (res.status === 'CLARIFY') {
     const q = res.questions[0];
     if (q.kind === 'REFERENCE') return q.prompt;
-    const items = res.questions.flatMap((x) => (x.kind === 'AVAILABILITY' ? x.requirements.map((r) => lowerFirst(r.display)) : []));
+    const reqs = res.questions.flatMap((x) => (x.kind === 'AVAILABILITY' ? x.requirements : []));
+    // an amount that serves several steps is spoken as one total, then what it includes (detail stays on screen)
+    if (reqs.some((x) => x.parts)) {
+      const word = (x: Requirement) => (x.unit === 'G' ? 'grams of ' : x.unit === 'ML' ? 'millilitres of ' : '');
+      const exact = reqs.filter((x) => x.qty), qual = reqs.filter((x) => !x.qty);
+      const ordered = [...exact.filter((x) => !x.parts), ...exact.filter((x) => x.parts)];
+      const spoken = ordered.map((x) => `${formatRational(x.qty!)} ${word(x)}${x.name}`);
+      const includes = ordered.filter((x) => x.parts).flatMap((x) => {
+        const main = x.parts!.reduce((a, b) => (b.qty.n / b.qty.d > a.qty.n / a.qty.d ? b : a));
+        const unitWord = x.unit === 'G' ? 'grams' : x.unit === 'ML' ? 'millilitres' : '';
+        const extra = x.parts!.find((p) => p.upTo);
+        return [...x.parts!.filter((p) => p !== main).map((p) => `${x.name} ${p.purpose}`),
+          ...(extra ? [`up to ${formatRational(extra.upTo!)} ${unitWord} extra, only if ${extra.noun ?? 'it'} needs it`] : [])];
+      });
+      return [`Do you have ${spoken.length > 1 ? `${spoken.slice(0, -1).join(', ')} and ${spoken[spoken.length - 1]}` : spoken[0]}?`,
+        includes.length ? `That includes ${includes.length > 1 ? `${includes.slice(0, -1).join(', ')} and ${includes[includes.length - 1]}` : includes[0]}.` : '',
+        ...qual.map((x) => `And do you also have ${lowerFirst(x.display)}?`)].filter(Boolean).join(' ');
+    }
+    const items = reqs.map((r) => lowerFirst(r.display));
     const list = items.length > 2 ? `${items.slice(0, -1).join('; ')}; and ${items[items.length - 1]}` : items.join(' and ');
     return `To check this, I need to know: do you have ${list}?`;
   }
@@ -417,7 +454,8 @@ function speechFor(res: Omit<EvaluationResult, 'speech'>): string {
     if (res.candidates.length > 1) return `There are ${res.candidates.length} possible changes. Choose one to see what it changes.`;
     const c = res.candidates[0];
     const pre = res.proposal?.response === 'REFUSED' ? `${res.proposal.text} ` : '';
-    return `${pre}Yes, with changes. ${c.consequence.headline} ${c.consequence.tradeoff} Say "use this change", or tap.`;
+    // "Yes" answers a proposal ("can I use …?"); asked only what to use, the cook hears the change itself
+    return `${pre}${res.proposal ? 'Yes, with changes.' : "Here's a change that works."} ${c.consequence.headline} ${c.consequence.tradeoff} Say "use this change", or tap.`;
   }
   const rf = res.refusal!;
   return `${rf.message} ${rf.unchanged}`.trim();

@@ -9,7 +9,7 @@ import { cmp, hash, type Rational } from '../domain/rational.ts';
 const bindingIdOf = (p: { patternId: Id; version: number }, useId: Id): Id => `cand_${hash({ p: p.patternId, v: p.version, u: useId }).slice(0, 12)}`;
 
 export { ENGINE_SEMANTICS };
-import { getIngredient, getStep, getUse, stepOrder, upperFirst, validateStructure } from '../domain/recipe.ts';
+import { getIngredient, getStep, getUse, renderStep, spoonText, stepOrder, upperFirst, validateStructure } from '../domain/recipe.ts';
 import { classLabel, classesOfKind, ingredientInClass, sameSet } from '../domain/vocabulary.ts';
 import { ENGINE_SEMANTICS } from '../contract/types.ts';
 import { evaluateBinding, factsHashOf } from '../engine/evaluate.ts';
@@ -87,7 +87,52 @@ function predicate(f: Facts, p: Predicate, ctx: Ctx): Tri {
     return v === null ? 'UNKNOWN' : cmp(v, p.min) >= 0 && cmp(v, p.max) <= 0 ? 'PASS' : 'FAIL';
   }
   if (p.kind === 'USE_PERFORMS') return performs(f, useRef(p.slot, ctx, f.recipe), p.functionId);
+  if (p.kind === 'RECIPE_HAS_USE_OF_CLASS') { const has = hasClass(f, p.classId, ctx); return has === null ? 'UNKNOWN' : has === p.expect ? 'PASS' : 'FAIL'; }
+  if (p.kind === 'NO_HOLD_BETWEEN') return noHold(f, p, ctx);
   return technique(f, getStep(f.recipe, stepRef(p.slot, ctx, f.recipe))!, p.techniqueId);
+}
+
+/** G1: does any ingredient other than the target's belong to the class? Every listed ingredient counts, used or not (a use
+ *  the reading never placed is still in the recipe). null: some ingredient's kind isn't REVIEWED, so absence is unknown. */
+function hasClass(f: Facts, classId: Id, ctx: Ctx): boolean | null {
+  let unknown = false;
+  for (const ing of f.recipe.ingredients.filter((i) => i.ingredientId !== ctx.target.ingredientId)) {
+    if (ing.kind?.prov.status === 'REVIEWED') { if (classesOfKind(f.vocab, ing.kind.kindId).includes(classId)) return true; continue; }
+    unknown = true;   // a proposed or missing kind is never evidence of absence
+    f.missing.push({ subject: { kind: 'INGREDIENT', id: ing.ingredientId }, predicate: 'KIND_CLASS', expected: classId, have: ing.kind ? ing.kind.prov.status : null, minStatus: 'REVIEWED', who: 'OWNER' });
+  }
+  return unknown ? null : false;
+}
+
+/** A stated time ("for 30 minutes", "1–2 hours", "overnight"): before the baking step it may be a rest or a chill. */
+const DURATION = /\b\d+(?:\s*[–-]\s*\d+)?\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\b|\bovernight\b/i;
+/** G1: no rest/chill/hold from just after `from` through `to`, judged against the whole method, not only the extracted steps
+ *  (closure 2026-10-08). FAIL: a hold cue in a step or in source text the reading didn't take in, or a reviewed hold
+ *  technique. UNKNOWN: an imported method not shown to be fully read from `from` through `to` (a step not found in the
+ *  source, or unaccounted source text between steps), a stated time before the baking step, or a step whose technique
+ *  isn't REVIEWED. An owner-authored recipe's steps are its source. Never PASS on what wasn't read. */
+function noHold(f: Facts, p: Extract<Predicate, { kind: 'NO_HOLD_BETWEEN' }>, ctx: Ctx): Tri {
+  const a = stepOrder(f.recipe, stepRef(p.from, ctx, f.recipe)), b = stepOrder(f.recipe, stepRef(p.to, ctx, f.recipe));
+  if (b <= a) return 'FAIL';
+  const steps = f.recipe.steps.slice(a, b);            // orders a+1 … b
+  const span = f.recipe.steps.slice(a - 1, b);         // orders a … b: every step whose wording must be found in the source
+  const hold = (text: string) => p.cues.some((c) => new RegExp(c, 'i').test(text));
+  if (steps.some((s) => hold(renderStep(f.recipe, s)) || hold(s.source?.gapBefore ?? ''))) return 'FAIL';   // a hold the source states blocks it
+  if (steps.some((s) => s.technique?.prov.status === 'REVIEWED' && p.techniques.includes(s.technique.techniqueId))) return 'FAIL';
+  const miss = (s: Step, predicate: 'SOURCE_COVERAGE' | 'TIMING' | 'TECHNIQUE', expected: string, have: string | null = null) =>
+    f.missing.push({ subject: { kind: 'STEP', id: s.stepId }, predicate, expected, have, minStatus: 'REVIEWED', who: 'OWNER' });
+  let unknown = false;
+  if (f.recipe.source?.rights !== 'OWNER_AUTHORED') {
+    for (const s of span) {
+      if (!s.source) { miss(s, 'SOURCE_COVERAGE', 'NOT_ASSESSED'); unknown = true; }
+      else if (!s.source.located) { miss(s, 'SOURCE_COVERAGE', s.source.gapBefore || 'NOT_FOUND'); unknown = true; }
+      else if (s !== span[0] && s.source.gapBefore) { miss(s, 'SOURCE_COVERAGE', s.source.gapBefore); unknown = true; }
+    }
+  }
+  for (const s of steps.slice(0, -1)) { const m = DURATION.exec(renderStep(f.recipe, s)); if (m) { miss(s, 'TIMING', m[0]); unknown = true; } }
+  const unrecognized = steps.filter((s) => s.technique?.prov.status !== 'REVIEWED');
+  for (const s of unrecognized) miss(s, 'TECHNIQUE', s.technique?.techniqueId ?? 'UNRECOGNIZED', s.technique ? s.technique.prov.status : null);
+  return unknown || unrecognized.length ? 'UNKNOWN' : 'PASS';
 }
 
 type BindResult = { binding: Binding | null; entry: CoverageEntry };
@@ -148,7 +193,7 @@ function bindTarget(p: Pattern, patternHash: string, r: Recipe, v: Vocabulary, t
         bindingId: bindingIdOf(p, target.useId), patternId: p.patternId, patternVersion: p.version, patternHash, patternTitle: p.title,
         kind: 'REFUSAL', targetUseId: target.useId, slots: ctx.slots, ops: [], quantities: {}, functionMap: [],
         coveredSiblingUseIds: [], uncoveredSiblingUseIds: [], consequence: null, proposal: null,
-        refusal: { classes: [...p.proposal.classes].sort(), requiredFunctionLabel: p.requiredFunctionLabel, text: p.text, scopeNote: p.scopeNote },
+        refusal: { classes: [...p.proposal.classes].sort(), requiredFunctionLabel: p.requiredFunctionLabel, text: p.text, scopeNote: p.scopeNote, ...(p.proposal.match === 'OMISSION' ? { omission: true as const } : {}), ...(p.answer ? { answer: p.answer } : {}) },
         guards: [], quantityStatus: p.evidence.quantityStatus, factsHash,
       },
       entry: { patternId: p.patternId, patternVersion: p.version, patternTitle: p.title, kind: p.kind, targetUseId: target.useId, status: 'BOUND', missing: [], failedCheck: null },
@@ -219,8 +264,10 @@ function bindRecovery(p: RecoveryPattern, patternHash: string, r: Recipe, v: Voc
       if (!replaced || replaced.amount.kind !== 'AS_WRITTEN') return 'CARRY_REQUIRES_AS_WRITTEN';
       amount = replaced.amount;
     } else {
-      const q = quantities[spec.qty];
-      amount = { kind: 'EXACT', value: q.value, unit: q.unit, asWritten: null };
+      const q = quantities[spec.qty], e = p.quantities[spec.qty];
+      const spoons = e?.kind === 'SCALE' && e.display === 'SPOONS' && q.unit === 'ML' ? spoonText(q.value, r.volumeSystem) : null;
+      if (e?.kind === 'SCALE' && e.display === 'SPOONS' && !spoons) return 'SPOON_AMOUNT_NOT_EXPRESSIBLE';
+      amount = { kind: 'EXACT', value: q.value, unit: q.unit, asWritten: spoons };
     }
     let allowance: IngredientUse['allowance'] = null;
     if (spec.allowance) {
@@ -246,6 +293,12 @@ function bindRecovery(p: RecoveryPattern, patternHash: string, r: Recipe, v: Voc
       if (op.op === 'REPLACE_USE') {
         ops.push({ op: 'REPLACE_USE', useId: replaced!.useId, newUse: u });
         texts[u.stepId] = texts[u.stepId].replaceAll(`{use:${replaced!.useId}}`, `{use:${u.useId}}`).replaceAll(`{allowance:${replaced!.useId}}`, `{allowance:${u.useId}}`);
+      } else if (typeof op.placement === 'object') {   // G6: beside another plan use, in that use's step
+        const anchor = localUse[op.placement.beside], token = anchor ? `{use:${anchor.useId}}` : '';
+        if (!anchor || anchor.stepId !== u.stepId || !texts[u.stepId].includes(token)) return entry('NOT_APPLICABLE', { code: 'USE_NOT_LOCATED_IN_TEXT', detail: `beside ${op.placement.beside}` });
+        ops.push({ op: 'ADD_USE', newUse: u });
+        texts[u.stepId] = texts[u.stepId].replace(token, `${token} ${op.placement.joiner} {use:${u.useId}}`);
+        ops.push({ op: 'REPLACE_STEP_TEXT', stepId: u.stepId, text: texts[u.stepId] });
       } else {
         ops.push({ op: 'ADD_USE', newUse: u });
         if (op.placement !== 'NONE') {
@@ -257,10 +310,21 @@ function bindRecovery(p: RecoveryPattern, patternHash: string, r: Recipe, v: Voc
         }
       }
     } else if (op.op === 'REMOVE_USE') {
-      ops.push({ op: 'REMOVE_USE', useId: useRef(op.use, ctx, r).useId });
+      const u = useRef(op.use, ctx, r);
+      ops.push({ op: 'REMOVE_USE', useId: u.useId });
+      if (op.placement === 'FROM_USE_LIST') {
+        const next = dropFromUseList(texts[u.stepId], u.useId);
+        if (next === null) return entry('NOT_APPLICABLE', { code: 'USE_NOT_IN_USE_LIST', detail: u.useId });
+        texts[u.stepId] = next;
+        ops.push({ op: 'REPLACE_STEP_TEXT', stepId: u.stepId, text: next });
+      }
     } else if (op.op === 'SET_STEP_TEXT') {
       const id = stepRef(op.step, ctx, r);
       texts[id] = localToken(op.text);
+      ops.push({ op: 'REPLACE_STEP_TEXT', stepId: id, text: texts[id] });
+    } else if (op.op === 'APPEND_STEP_NOTE') {
+      const id = stepRef(op.step, ctx, r);
+      texts[id] = `${texts[id].trimEnd()} ${op.text}`;
       ops.push({ op: 'REPLACE_STEP_TEXT', stepId: id, text: texts[id] });
     } else if (op.op === 'SET_STEP_TITLE') {
       const title = op.title.replace(/\{classLabel:([^}]+)\}/g, (_m, l: string) => {
@@ -334,8 +398,22 @@ export function joinUseList(text: string, useId: Id): string | null {
   return re.test(text) ? text.replace(re, `$1, $2 and {use:${useId}}`) : null;
 }
 
+/** Take {use:id} out of the use list it sits in ("A, B and C" → "A and B"; "A and B" → "A"); null when it isn't in one. */
+export function dropFromUseList(text: string, useId: Id): string | null {
+  const t = `\\{use:${useId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\}`, U = '\\{use:[^}]+\\}';
+  const tries: [RegExp, string][] = [
+    [new RegExp(`(${U}(?:, ${U})*), (${U}) and ${t}`), '$1 and $2'],   // last of three or more
+    [new RegExp(`(${U}) and ${t}`), '$1'],                              // last of two
+    [new RegExp(`${t} and (${U})`), '$1'],                              // first of two
+    [new RegExp(`${t}, `), ''],                                         // first or middle of three or more
+  ];
+  for (const [re, to] of tries) if (re.test(text)) return text.replace(re, to);
+  return null;
+}
+
 /** Evaluate the binding at its minimal eligible state with every availability answered ENOUGH. */
-export function dryRun(b: Binding, r: Recipe, v: Vocabulary): string | null {
+/** The binding evaluated at its guard step with nothing else progressed: the build-time dry run, and the import preview. */
+export function previewBinding(b: Binding, r: Recipe, v: Vocabulary) {
   const guardStep = b.guards[0]?.stepId ?? getUse(r, b.targetUseId)!.stepId;
   const g = stepOrder(r, guardStep);
   const snap: RunSnapshot = {
@@ -344,7 +422,11 @@ export function dryRun(b: Binding, r: Recipe, v: Vocabulary): string | null {
     // uncovered siblings are a per-request matter (AFFECTED_USE_UNACCOUNTED at runtime), so the dry run treats them as history
     useStatus: Object.fromEntries(r.uses.map((u) => [u.useId, stepOrder(r, u.stepId) < g || b.uncoveredSiblingUseIds.includes(u.useId) ? 'ADDED' : 'UNADDED'])),
   };
-  const out = evaluateBinding(b, snap, v, 'ASSUME_ENOUGH', 'dry-run');
+  return { snap, out: evaluateBinding(b, snap, v, 'ASSUME_ENOUGH', 'dry-run') };
+}
+
+export function dryRun(b: Binding, r: Recipe, v: Vocabulary): string | null {
+  const { out } = previewBinding(b, r, v);
   return out.status === 'ELIGIBLE' ? null : `${out.status}:${out.refusalCode ?? ''} ${out.checks.filter((c) => c.result !== 'PASS').map((c) => c.detail).join('; ')}`;
 }
 
@@ -380,7 +462,7 @@ export function compile(recipe: Recipe, vocab: Vocabulary, patterns: Pattern[]):
   }
   // realize/refuse conflicts are binding-scoped (SYN-F)
   for (const ref of bindings.filter((b) => b.kind === 'REFUSAL')) {
-    for (const rec of bindings.filter((b) => b.kind === 'RECOVERY' && b.targetUseId === ref.targetUseId && b.proposal && sameSet(b.proposal.classes, ref.refusal!.classes))) {
+    for (const rec of bindings.filter((b) => b.kind === 'RECOVERY' && !ref.refusal!.omission && b.targetUseId === ref.targetUseId && b.proposal && sameSet(b.proposal.classes, ref.refusal!.classes))) {
       for (const b of [ref, rec]) {
         const e = coverage.find((c) => c.targetUseId === b.targetUseId && c.patternId === b.patternId)!;
         e.status = 'CONFLICT'; e.failedCheck = { code: 'CONTRADICTORY_PROPOSAL_CLAIMS', detail: `${ref.bindingId} vs ${rec.bindingId}` };

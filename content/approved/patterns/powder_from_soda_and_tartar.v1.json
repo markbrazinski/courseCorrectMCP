@@ -1,0 +1,224 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "RECOVERY",
+  "patternId": "powder_from_soda_and_tartar",
+  "version": 1,
+  "title": "Baking soda and cream of tartar for baking powder",
+  "target": {
+    "ingredientClass": "baking-powder",
+    "performsAll": [
+      "LEAVENING"
+    ],
+    "stepTechnique": "COMBINE_DRY"
+  },
+  "slots": [
+    {
+      "slot": "preheat",
+      "kind": "STEP_BEFORE_TARGET",
+      "technique": "PREHEAT"
+    },
+    {
+      "slot": "mix",
+      "kind": "STEP_AFTER_TARGET",
+      "technique": "MIX_DOUGH"
+    },
+    {
+      "slot": "bake",
+      "kind": "STEP_AFTER_TARGET",
+      "technique": "BAKE"
+    }
+  ],
+  "applicability": [
+    {
+      "kind": "NO_HOLD_BETWEEN",
+      "from": "$target.step",
+      "to": "$bake",
+      "techniques": [
+        "REST"
+      ],
+      "cues": [
+        "\\b(?:chill\\w*|refrigerat\\w*|freez\\w*|overnight|make[- ]ahead)\\b",
+        "\\blet (?:it |them |the dough )?(?:rest|stand|sit)\\b",
+        "\\b(?:rest|stand|sit)s?\\b[^.;!]*\\b(?:minutes?|hours?)\\b",
+        "\\bset aside\\b",
+        "\\bcover (?:and|with)\\b"
+      ]
+    }
+  ],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "PROVISIONAL",
+    "basis": "B8, an ENGINEERING SELECTION, not consensus and not culinary validation. OD-7 (owner commission 2026-10-08, ENGINEERING only; not culinary validation, not released guidance). Evidence: private/research/substitution-knowledge (2026-10-07). Selected: America's Test Kitchen 1/4 tsp soda + 1/2 tsp cream of tartar per 1 tsp baking powder, 'Use right away' (SRC-LV-01#a; also SRC-LV-02#d 'Use immediately'); the same ratio from KA SRC-LV-06#j, Land O'Lakes SRC-LV-13#a, Arm & Hammer SRC-LV-09#f. Competing, kept: 1/4 tsp soda + 5/8 tsp cream of tartar (NDSU SRC-LV-15#b, USU SRC-LV-17#b, CSU SRC-LV-16#a); NDSU also 1/3 tsp soda + 1/2 tsp. Enforced: oven-heating step before the dry mix, a dough-mixing and a baking step after it, no rest, chill or hold from the dry mix through baking (an unrecognized step leaves it unknown), volume amounts only (no sourced weights). Input bounds 1/2 tsp-2 tbsp are engineering bounds."
+  },
+  "introduces": [
+    {
+      "local": "soda",
+      "kindId": "baking-soda",
+      "name": "Baking soda"
+    },
+    {
+      "local": "tartar",
+      "kindId": "cream-of-tartar",
+      "name": "Cream of tartar"
+    }
+  ],
+  "quantities": {
+    "soda": {
+      "kind": "SCALE",
+      "from": {
+        "listedTotalOf": "$target"
+      },
+      "sourceUnit": "ML",
+      "factor": {
+        "n": 1,
+        "d": 4
+      },
+      "resultUnit": "ML",
+      "inputDomain": [
+        {
+          "n": 5,
+          "d": 2
+        },
+        {
+          "n": 30,
+          "d": 1
+        }
+      ],
+      "increment": {
+        "n": 1,
+        "d": 100
+      },
+      "maxAbsError": {
+        "n": 1,
+        "d": 200
+      },
+      "outputDomain": [
+        {
+          "n": 1,
+          "d": 2
+        },
+        {
+          "n": 15,
+          "d": 2
+        }
+      ],
+      "display": "SPOONS"
+    },
+    "tartar": {
+      "kind": "SCALE",
+      "from": {
+        "listedTotalOf": "$target"
+      },
+      "sourceUnit": "ML",
+      "factor": {
+        "n": 1,
+        "d": 2
+      },
+      "resultUnit": "ML",
+      "inputDomain": [
+        {
+          "n": 5,
+          "d": 2
+        },
+        {
+          "n": 30,
+          "d": 1
+        }
+      ],
+      "increment": {
+        "n": 1,
+        "d": 100
+      },
+      "maxAbsError": {
+        "n": 1,
+        "d": 200
+      },
+      "outputDomain": [
+        {
+          "n": 1,
+          "d": 1
+        },
+        {
+          "n": 15,
+          "d": 1
+        }
+      ],
+      "display": "SPOONS"
+    }
+  },
+  "ops": [
+    {
+      "op": "REPLACE_USE",
+      "use": "$target",
+      "with": {
+        "local": "soda_use",
+        "ingredient": {
+          "introduce": "soda"
+        },
+        "at": "$target.step",
+        "qty": "soda",
+        "prepNote": null,
+        "functions": [
+          "LEAVENING"
+        ],
+        "allowance": null
+      }
+    },
+    {
+      "op": "ADD_USE",
+      "use": {
+        "local": "tartar_use",
+        "ingredient": {
+          "introduce": "tartar"
+        },
+        "at": "$target.step",
+        "qty": "tartar",
+        "prepNote": null,
+        "functions": [],
+        "allowance": null
+      },
+      "placement": "JOIN_USE_LIST"
+    },
+    {
+      "op": "APPEND_STEP_NOTE",
+      "step": "$target.step",
+      "text": "Have the oven hot before the liquid goes in: once the dough is wet, the baking soda and cream of tartar start working, so shape it and bake it straight away, without resting or chilling it."
+    },
+    {
+      "op": "SET_RESUME",
+      "step": "$target.step"
+    }
+  ],
+  "siblingHandlers": [],
+  "functionAccounting": [
+    {
+      "from": "$target",
+      "functionId": "LEAVENING",
+      "disposition": "RETAINED",
+      "to": "soda_use"
+    }
+  ],
+  "introducedFunctions": [],
+  "consequence": {
+    "outcomeClass": "SUBSTITUTED",
+    "equivalence": "NOT_EQUIVALENT",
+    "headline": "Use baking soda with cream of tartar instead of the baking powder, and bake as soon as the dough is mixed.",
+    "reason": "Baking powder is baking soda with a powdered acid; cream of tartar supplies the acid. This uses America's Test Kitchen's proportions; some extension guides use a little more cream of tartar.",
+    "tradeoff": "The mix starts working as soon as it's wet and keeps nothing back for the oven, so the dough can't wait. Not kitchen-tested in this recipe."
+  },
+  "proposal": {
+    "classes": [
+      "baking-soda",
+      "leavener",
+      "leavening-acid"
+    ],
+    "relation": "REALIZED_AS_PROPOSED",
+    "text": "Yes, with cream of tartar alongside the baking soda."
+  },
+  "guards": [
+    {
+      "kind": "CURRENT_STEP_IS",
+      "step": "$target.step"
+    }
+  ]
+}

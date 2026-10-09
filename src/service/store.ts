@@ -42,7 +42,9 @@ CREATE TABLE IF NOT EXISTS saved_recipes(
 CREATE TABLE IF NOT EXISTS swap_analyses(
   analysis_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, extraction_id TEXT NOT NULL, analyzer TEXT NOT NULL, prompt_hash TEXT NOT NULL, input_hash TEXT NOT NULL,
   status TEXT NOT NULL, raw_json TEXT, refs_json TEXT NOT NULL, issues_json TEXT, input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS demo_recipes(recipe_id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS swap_repairs(
+  repair_id TEXT PRIMARY KEY, analysis_id TEXT NOT NULL UNIQUE, analyzer TEXT NOT NULL, prompt_hash TEXT NOT NULL, input_hash TEXT NOT NULL, status TEXT NOT NULL,
+  requested_json TEXT NOT NULL, raw_json TEXT, input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS archived_recipes(recipe_id TEXT PRIMARY KEY, version_id TEXT NOT NULL, command_id TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS activity(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, tool TEXT NOT NULL, correlation_id TEXT, status TEXT NOT NULL, summary TEXT NOT NULL,

@@ -11,9 +11,11 @@ export type VoiceState =
 
 interface Rec { lang: string; interimResults: boolean; continuous: boolean; start(): void; stop(): void; abort(): void;
   onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal: boolean }> }) => void) | null;
-  onerror: ((e: { error: string }) => void) | null; onend: (() => void) | null }
+  onerror: ((e: { error: string }) => void) | null; onend: (() => void) | null; onstart: (() => void) | null }
 const SR = (window as unknown as { SpeechRecognition?: new () => Rec; webkitSpeechRecognition?: new () => Rec }).SpeechRecognition
   ?? (window as unknown as { webkitSpeechRecognition?: new () => Rec }).webkitSpeechRecognition;
+
+const PAUSE_MS = 1500;   // this much silence after speech ends the request
 
 export function useVoice(onFinal: (text: string) => void) {
   const [state, setState] = useState<VoiceState>(SR ? { kind: 'ready' } : { kind: 'unavailable', reason: 'unsupported' });
@@ -30,16 +32,18 @@ export function useVoice(onFinal: (text: string) => void) {
     if (!SR) return;
     audio.current?.pause();
     const r = new SR();
-    r.lang = 'en-US'; r.interimResults = true; r.continuous = false;
+    // continuous, ended by our own pause: Chrome's single-phrase mode stops at the first breath ("I don't have white wine.
+    // [pause] Will lemon juice work?" arrived as its first sentence only)
+    r.lang = 'en-US'; r.interimResults = true; r.continuous = true;
     final.current = '';
-    let failed = false;
+    let failed = false, quiet = 0;
     r.onresult = (e) => {
-      let interim = '';
-      for (let i = 0; i < e.results.length; i++) {
-        const res = e.results[i];
-        if (res.isFinal) final.current = res[0].transcript; else interim += res[0].transcript;
-      }
-      setState({ kind: 'listening', interim: (final.current || interim).trim() });
+      const fin: string[] = [], interim: string[] = [];
+      for (let i = 0; i < e.results.length; i++) { const res = e.results[i]; (res.isFinal ? fin : interim).push(res[0].transcript.trim()); }
+      final.current = fin.join(' ');
+      setState({ kind: 'listening', interim: [...fin, ...interim].join(' ').trim() });
+      window.clearTimeout(quiet);
+      quiet = window.setTimeout(() => r.stop(), PAUSE_MS);
     };
     r.onerror = (e) => {
       failed = true;
@@ -50,6 +54,7 @@ export function useVoice(onFinal: (text: string) => void) {
       else setState({ kind: 'clarify', message: `Speech recognition stopped (${e.error}).` });
     };
     r.onend = () => {
+      window.clearTimeout(quiet);
       rec.current = null;
       const text = final.current.trim();
       if (text) finalCb.current(text);
@@ -82,7 +87,7 @@ export function useVoice(onFinal: (text: string) => void) {
   const repeat = useCallback(() => { if (lastSpoken?.url) play(lastSpoken.url, lastSpoken.text); }, [lastSpoken]);
 
   useEffect(() => () => { rec.current?.abort(); audio.current?.pause(); }, []);
-  return { state, setState, start, stop, cancel, say, repeat, stopSpeaking, lastSpoken, supported: !!SR };
+  return { state, setState, start, stop, cancel, say, repeat, stopSpeaking, lastSpoken, audio, supported: !!SR };
 }
 
 export { route, type Routed } from './route.ts';

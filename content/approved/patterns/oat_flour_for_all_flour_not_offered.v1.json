@@ -1,0 +1,38 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "REFUSAL",
+  "patternId": "oat_flour_for_all_flour_not_offered",
+  "version": 1,
+  "title": "Oat flour for all the flour in a dough that rises",
+  "target": {
+    "ingredientClass": "flour",
+    "performsAll": [
+      "STRUCTURE"
+    ],
+    "stepTechnique": "COMBINE_DRY"
+  },
+  "slots": [],
+  "applicability": [
+    {
+      "kind": "RECIPE_HAS_USE_OF_CLASS",
+      "classId": "leavener",
+      "expect": true
+    }
+  ],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "NONE",
+    "basis": "D-5: DISPUTED, so not offered; not a finding that it can't work. OD-7 (owner commission 2026-10-08, ENGINEERING only; not culinary validation, not released guidance). Evidence: private/research/substitution-knowledge (2026-10-07). KA SRC-FS-13#a (up to half, non-yeasted); Bob's Red Mill SRC-FS-39#a (up to 20%); Quaker SRC-FS-45#c (all of it, if the bake doesn't need to rise) and #d (about 1/3 when relying on gluten for rise). The research candidate oat_flour_for_all_flour_in_chemically_leavened_dough and the retained AI card ('Oat flour for the plain flour', v2 shortcake) are kept as records."
+  },
+  "proposal": {
+    "classes": [
+      "oat-flour"
+    ],
+    "match": "EQUALS"
+  },
+  "response": "NOT_FUNCTIONALLY_EQUIVALENT",
+  "requiredFunctionLabel": "structure",
+  "text": "CourseCorrect doesn't offer oat flour in place of all the flour in this dough: for a dough that has to rise, the sources disagree (King Arthur Baking says up to half, Bob's Red Mill up to a fifth; Quaker allows all of it only when the bake doesn't need to rise).",
+  "scopeNote": "This is about replacing all of the flour here. It isn't a verdict on oat-flour recipes or on using some oat flour.",
+  "answer": "isn't offered here, because the sources disagree"
+}

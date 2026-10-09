@@ -23,7 +23,7 @@ async function setup() {
   const authoring = new Authoring({ store: svc.store, content, extractor: recordedExtractor(rec.readings, 'RECORDED_FIXTURES'), analyzer: recordedAnalyzer(rec.cards, 'RECORDED_FIXTURES') });
   svc.catalog = () => authoring.catalog();
   const port = 19000 + Math.floor(Math.random() * 900);
-  const server = await startHttp(svc, { port, adminToken: 'k', authoring });
+  const server = await startHttp(svc, { port, authoring });
   const client = new Client({ name: 'tools-test', version: '0' });
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
   const call = async (name: string, args: J = {}): Promise<J> => {
@@ -34,7 +34,7 @@ async function setup() {
   /** The companion's upload path (POST /imports); its sourceDocId is the opaque handle import_recipe takes. */
   const upload = async () => (await (await fetch(`http://127.0.0.1:${port}/imports`, { method: 'POST', headers: { 'content-type': 'application/pdf', 'x-filename': 'scones.pdf' }, body: Buffer.from(demoPdf(scone.lines)) })).json()) as J;
   const count = (t: string) => (svc.store.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${t}`)!).n;
-  return { svc, authoring, client, call, upload, count, close: async () => { await client.close(); server.close(); } };
+  return { svc, authoring, client, call, upload, count, base: `http://127.0.0.1:${port}`, close: async () => { await client.close(); server.close(); } };
 }
 
 describe('recipe-management MCP tools', () => {
@@ -44,6 +44,19 @@ describe('recipe-management MCP tools', () => {
     expect(tools.map((x) => x.name).sort()).toEqual(['apply_amendment', 'delete_recipe', 'evaluate_rescue', 'get_active_recipe', 'import_recipe', 'list_recipes', 'record_progress', 'start_recipe']);
     expect(tools.find((x) => x.name === 'delete_recipe')!.description).toMatch(/Archive .*kept/);
     expect(tools.find((x) => x.name === 'import_recipe')!.description).toMatch(/Never saves, reviews or releases/);
+    await t.close();
+  });
+
+  it('POST /uploads stores the file and starts nothing; import_recipe then reads it (the companion path)', async () => {
+    const t = await setup();
+    const post = (body: Uint8Array | string, type = 'application/pdf') => fetch(`${t.base}/uploads`, { method: 'POST', headers: { 'content-type': type, 'x-filename': 'scones.pdf' }, body: Buffer.from(body) });
+    const r = await post(demoPdf(DEMO.find((d) => d.name === 'scones')!.lines));
+    expect(r.status).toBe(201);
+    const { sourceDocId } = await r.json() as { sourceDocId: string };
+    expect([t.count('sources'), t.count('import_jobs'), t.count('drafts'), t.count('extractions')]).toEqual([1, 0, 0, 0]);
+    expect(await t.call('import_recipe', { commandId: cmd(), source: { kind: 'upload', sourceDocId } })).toMatchObject({ outcome: 'imported', draft: { saved: false, title: 'Cream Scones' } });
+    expect((await post('not really a pdf')).status).toBe(400);
+    expect(t.count('sources')).toBe(1);
     await t.close();
   });
 

@@ -1,0 +1,44 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "REFUSAL",
+  "patternId": "soda_alone_for_powder",
+  "version": 1,
+  "title": "Baking soda on its own for baking powder",
+  "target": {
+    "ingredientClass": "baking-powder",
+    "performsAll": [
+      "LEAVENING"
+    ],
+    "stepTechnique": "COMBINE_DRY"
+  },
+  "slots": [],
+  "applicability": [
+    {
+      "kind": "RECIPE_HAS_USE_OF_CLASS",
+      "classId": "citrus-juice",
+      "expect": false
+    },
+    {
+      "kind": "RECIPE_HAS_USE_OF_CLASS",
+      "classId": "leavening-acid",
+      "expect": false
+    }
+  ],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "NONE",
+    "basis": "B1. OD-7 (owner commission 2026-10-08, ENGINEERING only; not culinary validation, not released guidance). Evidence: private/research/substitution-knowledge (2026-10-07). Bob's Red Mill SRC-LV-10#f (soda lacks the acid to make it rise); Arm & Hammer SRC-LV-09#e (about 3-4 times as strong; bitter or soapy). Scope: no acid in the recipe (applicability; an unconfirmed ingredient leaves it unknown). A recipe reformulated around soda and an acid is outside it."
+  },
+  "proposal": {
+    "classes": [
+      "baking-soda",
+      "leavener"
+    ],
+    "match": "EQUALS"
+  },
+  "response": "NOT_FUNCTIONALLY_EQUIVALENT",
+  "requiredFunctionLabel": "leavening",
+  "text": "Baking soda on its own can't stand in for the baking powder in this recipe: soda needs an acid to make the dough rise, nothing here supplies one, and it's about 3 to 4 times as strong, so a like-for-like swap tastes soapy.",
+  "scopeNote": "This is about baking soda alone in this recipe as written. A recipe developed around soda and an acid is different, and so is soda with cream of tartar.",
+  "answer": "on its own can't make this dough rise"
+}

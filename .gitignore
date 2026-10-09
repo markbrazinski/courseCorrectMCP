@@ -40,6 +40,7 @@
 !/vitest.config.ts
 !/playwright.config.ts
 !/playwright.live.config.ts
+!/playwright.review.config.ts
 !/src/web/index.html
 !/src/web/tsconfig.json
 
@@ -189,3 +190,6 @@ temp/
 # ---------------------------------------------------------------------------
 !/README.md
 !/SETUP.md
+# The owner-authored sample recipe (OD-6, ENGINEERING demo content), for import by users and the review tests.
+!/samples/
+!/samples/scones-explicit.pdf

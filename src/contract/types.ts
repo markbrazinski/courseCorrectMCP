@@ -61,6 +61,9 @@ export interface Step {
   dependsOn: Id[];
   duration: { seconds: number; display: string; sourceText: string | null } | null;
   prov: Provenance;
+  /** Imports only (closure 2026-10-08): whether this step's wording was found, in order, in the source text, and the
+   *  source text left unaccounted for between it and the previous step ('' = none). Absent: not assessed. */
+  source?: { located: boolean; gapBefore: string };
 }
 export interface IngredientUse {
   useId: Id; ingredientId: Id; stepId: Id;
@@ -82,12 +85,19 @@ export type SlotSelector =
 export type Predicate =
   | { kind: 'AMOUNT_IN_RANGE'; slot: SlotRef; unit: Unit; min: Rational; max: Rational }
   | { kind: 'USE_PERFORMS'; slot: SlotRef; functionId: Id }
-  | { kind: 'STEP_TECHNIQUE'; slot: SlotRef; techniqueId: Id };
+  | { kind: 'STEP_TECHNIQUE'; slot: SlotRef; techniqueId: Id }
+  // G1 (commission 2026-10-08). Presence/absence over the whole recipe: absence PASSes only when every other ADD use's kind
+  // is REVIEWED; an unconfirmed kind is UNKNOWN (missing extraction is never proven absence).
+  | { kind: 'RECIPE_HAS_USE_OF_CLASS'; classId: Id; expect: boolean }
+  // No hold between two steps: every step after `from` up to and including `to` has a REVIEWED technique outside
+  // `techniques`, and no `cues` match its text. An unrecognized step is UNKNOWN, never PASS.
+  | { kind: 'NO_HOLD_BETWEEN'; from: SlotRef; to: SlotRef; techniques: Id[]; cues: string[] };
 export interface Exception { exceptionId: Id; when: Predicate; reason: string }
 export type QuantityExpr =
   | { kind: 'LITERAL'; value: Rational; unit: Unit }
   | { kind: 'SCALE'; from: SlotRef | { listedTotalOf: SlotRef }; sourceUnit: Unit; factor: Rational; resultUnit: Unit;
-      inputDomain: [Rational, Rational]; increment: Rational; maxAbsError: Rational; outputDomain: [Rational, Rational] }
+      inputDomain: [Rational, Rational]; increment: Rational; maxAbsError: Rational; outputDomain: [Rational, Rational];
+      /** show a volume result in the recipe's spoons ("¾ tsp"); the value stays in ML */ display?: 'SPOONS' }
   | { kind: 'UNRESOLVED'; unresolvedId: Id; question: string };
 export interface NewUseSpec {
   local: Id; ingredient: { slot: SlotRef } | { introduce: Id };
@@ -98,9 +108,12 @@ export interface NewUseSpec {
 }
 export type PatternOp =
   | { op: 'REPLACE_USE'; use: SlotRef; with: NewUseSpec }
-  | { op: 'ADD_USE'; use: NewUseSpec; placement: 'JOIN_USE_LIST' | 'APPEND_SENTENCE' | 'NONE' }
-  | { op: 'REMOVE_USE'; use: SlotRef }
+  // G6: `beside` writes the new use right after another plan use's token ("{use:a} mixed with {use:b}"); fails closed if absent
+  | { op: 'ADD_USE'; use: NewUseSpec; placement: 'JOIN_USE_LIST' | 'APPEND_SENTENCE' | 'NONE' | { beside: Id; joiner: string } }
+  | { op: 'REMOVE_USE'; use: SlotRef; placement?: 'FROM_USE_LIST' }   // FROM_USE_LIST: drop it from "A, B and C" (fails closed if not in one)
   | { op: 'SET_STEP_TEXT'; step: SlotRef; text: string }
+  /** an authored sentence after the step's own wording (no amounts); the step counts as touched (protected work) */
+  | { op: 'APPEND_STEP_NOTE'; step: SlotRef; text: string }
   | { op: 'SET_STEP_TITLE'; step: SlotRef; title: string }
   | { op: 'SET_RESUME'; step: SlotRef }
   // Specified, deferred (ESOD §4.1): the binder fails closed with UNSUPPORTED_OP for any binding that uses them.
@@ -131,8 +144,12 @@ export interface RecoveryPattern extends PatternBase {
 }
 export interface RefusalPattern extends PatternBase {
   kind: 'REFUSAL';
-  proposal: { classes: Id[]; match: 'EQUALS' };
+  /** EQUALS: refuses exactly that replacement. OMISSION (classes []): refuses leaving the ingredient out; it never refuses a
+   *  replacement, so it only removes omission plans (an import card's "omit"). */
+  proposal: { classes: Id[]; match: 'EQUALS' | 'OMISSION' };
   response: 'NOT_FUNCTIONALLY_EQUIVALENT'; requiredFunctionLabel: string; text: string; scopeNote: string;
+  /** authored ending for "<proposal> …" in a refusal's reasons ("can't make this dough rise on its own"); absent: "can't <technique>" */
+  answer?: string;
 }
 export type Pattern = RecoveryPattern | RefusalPattern;
 
@@ -147,7 +164,7 @@ export type Op =
   | { op: 'SET_RESUME'; stepId: Id };
 export interface MissingFact {
   subject: { kind: 'USE' | 'STEP' | 'INGREDIENT'; id: Id };
-  predicate: 'FUNCTION' | 'TECHNIQUE' | 'KIND_CLASS' | 'AMOUNT_EXACT';
+  predicate: 'FUNCTION' | 'TECHNIQUE' | 'KIND_CLASS' | 'AMOUNT_EXACT' | 'SOURCE_COVERAGE' | 'TIMING';
   expected: string; have: string | null; minStatus: FactStatus; who: 'COOK' | 'OWNER';
 }
 export type CoverageStatus = 'BOUND' | 'NEEDS_FACTS' | 'NOT_APPLICABLE' | 'AMBIGUOUS' | 'QUANTITY_UNRESOLVED' | 'DRY_RUN_FAILED' | 'CONFLICT';
@@ -164,7 +181,7 @@ export interface Binding {
   coveredSiblingUseIds: Id[]; uncoveredSiblingUseIds: Id[];
   consequence: Consequence | null;
   proposal: ProposalClaim | null;                            // recovery claim
-  refusal: { classes: Id[]; requiredFunctionLabel: string; text: string; scopeNote: string } | null;
+  refusal: { classes: Id[]; requiredFunctionLabel: string; text: string; scopeNote: string; omission?: true; answer?: string } | null;
   guards: { kind: 'CURRENT_STEP_IS'; stepId: Id }[];
   quantityStatus: PatternBase['evidence']['quantityStatus'];
   factsHash: Sha256;                                         // hash of the facts the binding read
@@ -177,6 +194,12 @@ export interface CardSource { role: string; opinion: string; tradeoff: string | 
 export interface CardEntry {
   useId: Id; verdict: 'swap' | 'omit' | 'no' | null; role: string | null; opinion: string | null;
   status: 'COMPILED' | 'SUPERSEDED' | 'INVALID'; reason: string | null;
+  normalized?: string[];   // deterministic, meaning-preserving repairs applied before validation (the raw card is kept)
+  roleNote?: string;       // R-1: where the card's roles differ from the approved table's (the table's were used)
+  /** The one correction round (commission 2026-10-07), when this use was sent to it: why, and what came of it. */
+  repair?: { originalReason: string; outcome: 'REPAIRED' | 'STILL_INVALID' | 'NOT_RETURNED' | 'DUPLICATE' | 'NOT_RUN' | 'RUNNING'; detail?: string };
+  /** ccmcp-swaps-3: several ranked suggestions for this use, best first: each one's rejection reason, or the one used. */
+  alternates?: { name: string; reason: string | null; used?: boolean }[];
 }
 export interface RecipePack {
   schema: 'cc-pack/1'; packHash: Sha256; engineSemantics: number;
@@ -207,6 +230,8 @@ export interface Requirement {
   forSteps: { stepId: Id; order: number }[];
   includesUpTo: Rational | null;
   alreadyReserved: { qty: Rational; display: string; forSteps: { stepId: Id; order: number }[] } | null;
+  /** When the stated amounts serve several steps: each use's amount and purpose (from its step's technique, never its title). */
+  parts?: { qty: Rational; purpose: string; noun: string | null; order: number; upTo: Rational | null }[];
 }
 export interface StepChange {
   stepId: Id; kind: 'CHANGED' | 'UNCHANGED' | 'REMOVED' | 'INSERTED';

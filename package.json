@@ -17,12 +17,11 @@
     "start": "npm run build:web && npm run serve",
     "e2e": "playwright test",
     "e2e:live": "playwright test -c playwright.live.config.ts",
-    "serve:live": "npm run build:web && CC_LIVE=1 CC_DEMO=1 CC_FIXTURE_RECIPES=1 CC_INTERPRETER=nova CC_SPEECH=polly CC_EXPLAINER=nova CC_DB=.artifacts/walkthrough/m3-live.db node --disable-warning=ExperimentalWarning src/service/main.ts",
+    "e2e:review": "playwright test -c playwright.review.config.ts",
     "evidence:m3": "node --disable-warning=ExperimentalWarning src/probes/m3-evidence.ts",
     "transfer": "node --disable-warning=ExperimentalWarning src/probes/transfer.ts",
     "probe:cards": "node --disable-warning=ExperimentalWarning src/probes/cards-probe.ts",
-    "demo": "npm run build:web && node --disable-warning=ExperimentalWarning src/demo/rehearse.ts",
-    "demo:export": "node --disable-warning=ExperimentalWarning src/demo/export.ts"
+    "probe:cards2": "node --disable-warning=ExperimentalWarning src/probes/cards2-probe.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1139.0",

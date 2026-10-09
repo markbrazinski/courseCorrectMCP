@@ -5,16 +5,16 @@
 import { randomUUID } from 'node:crypto';
 import type { CoverageEntry, Id, MissingFact, Provenance, Recipe, RecipePack, RoleTable, Vocabulary } from '../contract/types.ts';
 import { compile } from '../compile/binder.ts';
-import { addCards, checkCards, refsOf, type CheckedCards, type Refs } from '../compile/cards.ts';
+import { addCards, checkCards, refsOf, repairRequests, type CheckedCards, type Refs, type RepairRound } from '../compile/cards.ts';
 import { coverageSummary, recipeContent, type RecipeBookEntry, type RecipeContent } from '../contract/project.ts';
 import { hash } from '../domain/rational.ts';
 import { amountDisplay, getIngredient, getStep, parseAmount, renderStep } from '../domain/recipe.ts';
-import { functionLabel, kindOf, sameSet } from '../domain/vocabulary.ts';
+import { functionLabel, kindByName, sameSet } from '../domain/vocabulary.ts';
 import type { Content } from '../service/content.ts';
 import type { Store } from '../service/store.ts';
-import { buildDraft, promptIdentity, type DraftBody, type Extractor, type Issue, type SourceRef } from './extract.ts';
+import { buildDraft, methodCoverage, promptIdentity, type DraftBody, type Extractor, type Issue, type SourceRef } from './extract.ts';
 import { readPastedText, readPdf, type SourcePage, type SourceText } from './source.ts';
-import { recordedAnalyzer, swapPromptIdentity, swapUserMessage, type SwapAnalyzer } from './swap-analysis.ts';
+import { offAnalyzer, repairMessage, repairPromptIdentity, swapMessageV3, swapPromptIdentity, swapUserMessage, type SwapAnalyzer } from './swap-analysis.ts';
 
 export type Release = RecipeBookEntry['release'];
 type Subject = { kind: 'INGREDIENT' | 'STEP' | 'USE'; id: Id };
@@ -44,10 +44,11 @@ export class Authoring {
   private readonly running = new Map<string, Promise<unknown>>();
   constructor(o: AuthoringOptions) {
     this.store = o.store; this.content = o.content; this.extractor = o.extractor;
-    this.analyzer = o.analyzer ?? recordedAnalyzer({});   // no analyzer: every use fails closed ("couldn't work out a swap")
+    this.analyzer = o.analyzer ?? offAnalyzer;   // no analyzer: every use fails closed ("not checked yet")
     this.now = o.now ?? (() => new Date().toISOString());
     this.newId = o.newId ?? ((p) => `${p}_${randomUUID()}`);
     this.store.run(`UPDATE import_jobs SET state = 'failed', failure_json = ? WHERE state IN ('queued', 'running')`, JSON.stringify({ code: 'INTERNAL', message: 'Reading was interrupted. Try again.' }));
+    this.store.run(`UPDATE swap_repairs SET status = 'FAILED_CALL:INTERRUPTED' WHERE status = 'RUNNING'`);
   }
   private get v(): Vocabulary { return this.content.vocab; }
 
@@ -87,6 +88,13 @@ export class Authoring {
     return { status: 202, job: this.job(jobId), draftId };
   }
 
+  /** Store an uploaded PDF without reading a recipe from it; its id is the opaque handle `import_recipe` takes. */
+  async upload(bytes: Uint8Array, filename: string): Promise<{ status: 201; sourceDocId: Id } | { status: 400 | 413; error: { code: string; message: string } }> {
+    const read = await readPdf(bytes);
+    if (!read.ok) return { status: read.code === 'TOO_LARGE' ? 413 : 400, error: { code: read.code, message: FAILURE_MESSAGES[read.code] ?? read.detail } };
+    return { status: 201, sourceDocId: this.store.tx(() => this.addSource(read.source, 'PDF', 'UPLOAD', filename)) };   // a scan still stores; its import then fails as unreadable
+  }
+
   private addSource(src: SourceText, kind: 'PDF' | 'TEXT', origin: 'UPLOAD' | 'COOK_PASTED', displayName: string): Id {
     const id = this.newId('src');
     this.store.run('INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?)', id, src.sha256, kind, origin, displayName, src.byteLength, JSON.stringify(src), this.now());
@@ -108,7 +116,7 @@ export class Authoring {
       const r = await this.extractor.extract(srcs.flatMap((s) => s.pages), this.v, extractionId, `import ${draftId}`);
       const recipeId = this.store.get<{ recipe_id: string }>('SELECT recipe_id FROM drafts WHERE draft_id = ?', draftId)!.recipe_id;
       const built = r.ok ? buildDraft(r.raw, this.v, srcs, recipeId, extractionId, r.extractor) : null;
-      this.store.run('INSERT INTO extractions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', extractionId, draftId, jobId, r.extractor, promptIdentity(this.v),
+      this.store.run('INSERT INTO extractions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', extractionId, draftId, jobId, r.extractor, (r.ok && r.promptHash) || promptIdentity(this.v),
         !r.ok ? `FAILED_CALL:${r.error}` : built!.ok ? 'SUCCEEDED' : `FAILED_VALIDATION:${built!.code}`, r.ok ? JSON.stringify(r.raw) : null,
         JSON.stringify(!r.ok ? [{ code: r.error, detail: r.detail }] : built!.ok ? built!.body.issues : built!.issues),
         r.usage?.inputTokens ?? null, r.usage?.outputTokens ?? null, r.costUsd, this.now());
@@ -130,17 +138,36 @@ export class Authoring {
   }
   async waitForJob(jobId: Id) { await this.running.get(jobId); return this.job(jobId); }
 
-  /** Swap analysis over the reading as read. The raw cards are kept as evidence; validation runs on every compile. */
+  /** Swap analysis over the reading as read. The raw cards are kept as evidence; validation runs on every compile. A
+   *  recording may answer the same reading's message under an earlier approved vocabulary; it is stored as what it is. */
   private async runAnalysis(draftId: Id, body: DraftBody) {
-    const message = swapUserMessage(body.recipe, this.v);
+    const [message, ...alternates] = swapMessageVariants(body, this.v, this.content.history);
     const id = this.newId('sa');
-    const r = await this.analyzer.analyze(message, this.v, id, `swaps ${draftId}`)
+    const r = await this.analyzer.analyze(message, this.v, id, `swaps ${draftId}`, alternates)
       .catch((e: Error) => ({ ok: false as const, error: 'CALL_FAILED', detail: e.message.slice(0, 200), analyzer: this.analyzer.name, usage: null, costUsd: 0 }));
     const refs = refsOf(body.recipe);
     const issues = r.ok ? checkCards(r.raw, refs, body.recipe, this.v, null).entries.filter((e) => e.status === 'INVALID') : [{ code: r.error, detail: r.detail }];
-    this.store.run('INSERT INTO swap_analyses VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', id, draftId, body.extractionId, r.analyzer, swapPromptIdentity(this.v), hash(message),
-      r.ok ? 'SUCCEEDED' : `FAILED_CALL:${r.error}`, r.ok ? JSON.stringify(r.raw) : null, JSON.stringify(refs), JSON.stringify(issues),
+    this.store.run('INSERT INTO swap_analyses VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', id, draftId, body.extractionId, r.analyzer, (r.ok && r.promptHash) || swapPromptIdentity(this.v),
+      hash((r.ok && r.answered) || message), r.ok ? 'SUCCEEDED' : `FAILED_CALL:${r.error}`, r.ok ? JSON.stringify(r.raw) : null, JSON.stringify(refs), JSON.stringify(issues),
       r.usage?.inputTokens ?? null, r.usage?.outputTokens ?? null, r.costUsd, this.now());
+    if (r.ok && this.analyzer.repair) await this.runRepair(draftId, id, body);
+  }
+
+  /** The ONE correction round per analysis: every card the checks rejected for a reason the model can fix, batched, unless
+   *  reviewed content already decides that use. The round's output is kept apart from the first round's (swap_repairs). */
+  private async runRepair(draftId: Id, analysisId: Id, body: DraftBody) {
+    const { pack } = this.coverageOf(draftId);
+    const a = this.store.get<{ raw_json: string; refs_json: string }>('SELECT raw_json, refs_json FROM swap_analyses WHERE analysis_id = ?', analysisId)!;
+    const requests = pack ? repairRequests(pack, JSON.parse(a.refs_json) as Refs, JSON.parse(a.raw_json) as unknown) : [];
+    if (!requests.length) return;
+    const message = repairMessage(body.recipe, this.v, requests);
+    const id = this.newId('sr');
+    this.store.run('INSERT INTO swap_repairs VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, ?)', id, analysisId, this.analyzer.name, repairPromptIdentity(this.v), hash(message), 'RUNNING',
+      JSON.stringify(requests.map(({ useRef, reason }) => ({ useRef, reason }))), this.now());
+    const r = await this.analyzer.repair!(message, this.v, id, `repair ${draftId}`)
+      .catch((e: Error) => ({ ok: false as const, error: 'CALL_FAILED', detail: e.message.slice(0, 200), analyzer: this.analyzer.name, usage: null, costUsd: 0 }));
+    this.store.run('UPDATE swap_repairs SET analyzer = ?, status = ?, raw_json = ?, input_tokens = ?, output_tokens = ?, cost_usd = ? WHERE repair_id = ?', r.analyzer,
+      r.ok ? 'SUCCEEDED' : `FAILED_CALL:${r.error}`, r.ok ? JSON.stringify(r.raw) : null, r.usage?.inputTokens ?? null, r.usage?.outputTokens ?? null, r.costUsd, id);
   }
 
   /** New body revision; facts whose subject no longer exists (by content hash) are retired, never silently re-pointed. */
@@ -170,17 +197,24 @@ export class Authoring {
 
   effective(draftId: Id): Recipe | null { return this.prepared(draftId)?.recipe ?? null; }
 
-  /** The reading + corroboration + validated cards (their roles) + live facts, and the checked cards themselves. */
-  private prepared(draftId: Id): { recipe: Recipe; cards: CheckedCards } | null {
+  /** The reading + corroboration + roles (R-1 table, else validated cards) + live facts, and the checked cards themselves. */
+  private prepared(draftId: Id): { recipe: Recipe; cards: CheckedCards; disagreements: { useId: Id; card: Id[]; table: Id[] }[]; identity: ReturnType<typeof resolveIdentity> } | null {
     const b = this.body(draftId);
     if (!b) return null;
     const r: Recipe = structuredClone(b.recipe);
     r.revision = this.revision(draftId);
-    const a = this.store.get<{ analysis_id: string; status: string; raw_json: string | null; refs_json: string }>(
-      'SELECT analysis_id, status, raw_json, refs_json FROM swap_analyses WHERE draft_id = ? AND extraction_id = ? ORDER BY rowid DESC LIMIT 1', draftId, b.extractionId);
-    const cards = checkCards(a?.raw_json ? JSON.parse(a.raw_json) as unknown : null, a ? JSON.parse(a.refs_json) as Refs : null, r, this.v,
-      !a ? 'NO_ANALYSIS' : a.status !== 'SUCCEEDED' ? a.status : null);
-    applyAuthority(r, this.v, this.content.roles, new Map([...cards.plans].map(([id, p]) => [id, p.functions])), a ? `card:${a.analysis_id}` : 'card');
+    methodCoverage(r, this.draftSources(draftId).flatMap((s) => s.text.pages));   // what of the source the steps account for (closure 2026-10-08)
+    const a = this.store.get<{ analysis_id: string; status: string; raw_json: string | null; refs_json: string; input_hash: string }>(
+      'SELECT analysis_id, status, raw_json, refs_json, input_hash FROM swap_analyses WHERE draft_id = ? AND extraction_id = ? ORDER BY rowid DESC LIMIT 1', draftId, b.extractionId);
+    // a model analysis describes the reading it was given: once the reading changes (an owner repair), it no longer applies.
+    // A vocabulary change alone is not a reading change: the same reading's message under an earlier vocabulary still matches.
+    const stale = !!a && !swapMessageVariants(b, this.v, this.content.history).some((m) => a.input_hash === hash(m));
+    const rep = a && !stale ? this.store.get<{ status: string; requested_json: string; raw_json: string | null }>('SELECT status, requested_json, raw_json FROM swap_repairs WHERE analysis_id = ?', a.analysis_id) : undefined;
+    const identity = resolveIdentity(r, this.v, this.content.roles);   // before the cards are checked: they are judged against what the recipe's ingredients ARE
+    const cards = checkCards(a?.raw_json && !stale ? JSON.parse(a.raw_json) as unknown : null, a ? JSON.parse(a.refs_json) as Refs : null, r, this.v,
+      !a ? 'NO_ANALYSIS' : stale ? 'STALE_ANALYSIS' : a.status !== 'SUCCEEDED' ? a.status : null,
+      rep ? { status: rep.status, requested: JSON.parse(rep.requested_json) as RepairRound['requested'], raw: rep.raw_json ? JSON.parse(rep.raw_json) as unknown : null } : null);
+    const disagreements = applyAuthority(r, this.v, this.content.roles, new Map([...cards.plans].map(([id, ps]) => [id, ps[0].functions])), a ? `card:${a.analysis_id}` : 'card');
     const cores = coreHashes(b.recipe);
     const byCore = new Map([...cores].map(([k, v]) => [v, k]));
     for (const f of this.liveFacts(draftId)) {
@@ -202,7 +236,7 @@ export class Authoring {
         if (f.predicate === 'AMOUNT') applyAmount(u, 'amount', 'amountProv', value as AmountValue, prov, r.volumeSystem);
       }
     }
-    return { recipe: r, cards };
+    return { recipe: r, cards, disagreements, identity };
   }
 
   /** Reviewed patterns first, then the validated cards (src/compile/cards.ts). The same engine for both. */
@@ -210,7 +244,15 @@ export class Authoring {
     const p = this.prepared(draftId);
     if (!p) return { pack: null, errors: ['no reading yet'] };
     const res = compile(p.recipe, this.v, this.content.patterns);
-    return { pack: res.pack ? addCards(res.pack, p.cards, this.v) : null, errors: res.errors };
+    if (!res.pack) return { pack: null, errors: res.errors };
+    const pack = addCards(res.pack, p.cards, this.v, this.content.patterns, this.content.roles.cues);
+    for (const d of p.disagreements) {   // R-1: the table's roles were used; the card's reading is kept as a note
+      const e = pack.cards?.find((x) => x.useId === d.useId);
+      if (e) e.roleNote = `the import analysis read ${d.card.join(' + ')}; the approved role table's ${d.table.join(' + ')} was used`;
+      pack.warnings.push(`ROLE_DISAGREES:${d.useId}: card ${d.card.join('+')} vs table ${d.table.join('+')}`);
+    }
+    for (const x of p.identity) pack.warnings.push(`KIND_FROM_NAME:${x.ingredientId}: "${x.name}" is ${x.kindId} by approved name; the reading proposed ${x.proposed ?? 'no kind'}`);
+    return { pack, errors: res.errors };
   }
 
   // ---------- blockers (computed, never stored) ----------
@@ -345,7 +387,8 @@ export class Authoring {
     const e = this.catalog().find((x) => x.recipeId === recipeId);
     if (!e) throw new NotFound(recipeId);
     const draftId = this.store.get<{ draft_id: string }>('SELECT draft_id FROM saved_recipes WHERE recipe_id = ? AND version_id = ?', recipeId, e.versionId)!.draft_id;
-    return { version: { id: e.versionId, recipeId, createdFromDraft: draftId, content: e.pack ? recipeContent(e.pack.recipe, this.v, e.pack, e.pack.recipe, this.content.patterns) : null, release: e.release }, sources: this.wireSources(draftId) };
+    return { version: { id: e.versionId, recipeId, createdFromDraft: draftId, content: e.pack ? recipeContent(e.pack.recipe, this.v, e.pack, e.pack.recipe, this.content.patterns, { pending: false }) : null, release: e.release }, sources: this.wireSources(draftId),
+      sourceLines: this.sourceLines(draftId), sourceRefs: this.body(draftId)?.sourceRefs ?? {} };   // "View source" on a reopened recipe
   }
 
   // ---------- wire ----------
@@ -360,7 +403,9 @@ export class Authoring {
     const body = this.body(draftId), r = this.effective(draftId);
     const { pack } = this.coverageOf(draftId);
     const saved = this.store.get<{ recipe_id: string; version_id: string; draft_revision: number }>('SELECT recipe_id, version_id, draft_revision FROM saved_recipes WHERE draft_id = ? ORDER BY seq DESC LIMIT 1', draftId);
-    const content = r ? recipeContent(r, this.v, pack ?? emptyPack(r), r, this.content.patterns) : null;
+    // the swap analysis of this reading may still be running (a job past the reading stages): those uses are pending
+    const pending = !!this.store.get(`SELECT 1 FROM import_jobs WHERE draft_id = ? AND state IN ('queued', 'running')`, draftId);
+    const content = r ? recipeContent(r, this.v, pack ?? emptyPack(r), r, this.content.patterns, { pending }) : null;
     // the model's role guesses stay on the wire for display only ("import guessed …"); they never bind
     for (const u of content?.ingredients.flatMap((i) => i.uses) ?? []) {
       const g = body!.recipe.uses.find((x) => x.useId === u.id)?.functions ?? [];
@@ -391,31 +436,58 @@ export class Authoring {
 
 // ---------- helpers ----------
 /**
- * Import authority (owner decisions 2026-10-02, OD-4, OD-5). A proposed kind counts when the ingredient's name is that kind's
- * label or an alias; a proposed technique counts when the step text has one of its content cues. A use's roles come from
- * its validated swap card: REVIEWED (by the role table) when the table has the same functions for the corroborated
- * kind × technique, otherwise PROPOSED (they then serve only the card's own plan). Without a valid card the reading's
- * guesses stay PROPOSED; the role table alone no longer assigns roles.
+ * Import authority (owner decisions 2026-10-02, OD-4, OD-5; R-1 2026-10-07). A proposed kind counts when the ingredient's
+ * name is that kind's label or an alias; a proposed technique counts when the step text has one of its content cues.
+ * R-1: where an ADD use's kind and technique are both confirmed and the approved role table has that kind × technique, the
+ * row's functions are the use's roles, MACHINE_CHECKED (REVIEWED by CONTENT, ref = the row and its decision), whatever an
+ * import card says and whether or not the card's plan validated; a disagreeing card is returned for diagnostics. No row, or
+ * a kind/technique not confirmed: the validated card's roles stay PROPOSED (serving only its own plan), else the reading's.
  */
-export function applyAuthority(r: Recipe, v: Vocabulary, roles: RoleTable, cardFunctions: Map<Id, Id[]> = new Map(), cardRef = 'card') {
-  const norm = (x: string) => x.toLowerCase().replace(/\s+/g, ' ').trim();
-  const content = (ref: string): Provenance => ({ status: 'REVIEWED', by: 'CONTENT', ref });
+/** The reading's swap message now, then the same reading as earlier approved vocabularies and the earlier tokenizer (uses
+ *  it couldn't place) showed it: a retained analysis of any of them describes this reading. Never a different reading. */
+function swapMessageVariants(b: DraftBody, v: Vocabulary, history: Vocabulary[]): string[] {
+  const placements = b.barePlaced?.length ? [new Set<Id>(), new Set(b.barePlaced)] : [new Set<Id>()];
+  // the current (ccmcp-swaps-3) message first; the earlier prompt's messages still identify retained analyses of this reading
+  return [...new Set([swapMessageV3(b.recipe, v), ...[v, ...history].flatMap((x) => placements.map((p) => swapUserMessage(b.recipe, x, p)))])];
+}
+const content = (ref: string): Provenance => ({ status: 'REVIEWED', by: 'CONTENT', ref });
+/**
+ * Identity (commission 2026-10-07): an ingredient whose name, preparation words set aside, is a kind's label or TRUE alias
+ * is that kind, REVIEWED by CONTENT, whatever kind (or none) the reading proposed; a disagreeing tag is returned. A name no
+ * kind owns keeps the reading's tag as PROPOSED (never promoted). Sharing a class never makes two kinds one ingredient.
+ * A proposed technique counts when the step text has one of its approved cues.
+ */
+export function resolveIdentity(r: Recipe, v: Vocabulary, roles: RoleTable): { ingredientId: Id; name: string; proposed: Id | null; kindId: Id }[] {
+  const corrected: { ingredientId: Id; name: string; proposed: Id | null; kindId: Id }[] = [];
   for (const i of r.ingredients) {
-    const k = i.kind?.prov.status === 'PROPOSED' ? kindOf(v, i.kind.kindId) : undefined;
-    if (k && [k.label, ...k.aliases].some((a) => norm(a) === norm(i.name))) i.kind = { kindId: k.kindId, prov: content('vocabulary.json#aliases') };
+    if (i.kind?.prov.status === 'REVIEWED') continue;
+    const k = kindByName(v, i.name);
+    if (!k) continue;
+    if (i.kind?.kindId !== k.kindId) corrected.push({ ingredientId: i.ingredientId, name: i.name, proposed: i.kind?.kindId ?? null, kindId: k.kindId });
+    i.kind = { kindId: k.kindId, prov: content('vocabulary.json#aliases') };
   }
   for (const s of r.steps) {
     const t = s.technique, text = renderStep(r, s);
     if (t?.prov.status === 'PROPOSED' && (roles.cues[t.techniqueId] ?? []).some((c) => new RegExp(c, 'i').test(text))) s.technique = { techniqueId: t.techniqueId, prov: content('roles.json#cues') };
   }
+  return corrected;
+}
+
+export function applyAuthority(r: Recipe, v: Vocabulary, roles: RoleTable, cardFunctions: Map<Id, Id[]> = new Map(), cardRef = 'card'): { useId: Id; card: Id[]; table: Id[] }[] {
+  resolveIdentity(r, v, roles);
+  const disagreements: { useId: Id; card: Id[]; table: Id[] }[] = [];
   for (const u of r.uses) {
     const fns = cardFunctions.get(u.useId);
-    if (!fns) continue;
     const k = getIngredient(r, u.ingredientId)?.kind, t = getStep(r, u.stepId)?.technique;
-    const row = k?.prov.status === 'REVIEWED' && t?.prov.status === 'REVIEWED' ? roles.roles.find((x) => x.kindId === k.kindId && x.techniqueId === t.techniqueId) : undefined;
-    const agrees = !!row && sameSet(row.functions, fns);
-    u.functions = fns.map((f) => ({ functionId: f, label: null, prov: agrees ? content('roles.json') : { status: 'PROPOSED', by: 'MODEL', ref: cardRef } }));
+    const row = u.kind === 'ADD' && k?.prov.status === 'REVIEWED' && t?.prov.status === 'REVIEWED' ? roles.roles.find((x) => x.kindId === k.kindId && x.techniqueId === t.techniqueId) : undefined;
+    if (row) {
+      u.functions = row.functions.map((f) => ({ functionId: f, label: null, prov: content(`roles.json#${row.kindId}×${row.techniqueId} (${roles.decisionRef}; R-1)`) }));
+      if (fns && !sameSet(row.functions, fns)) disagreements.push({ useId: u.useId, card: fns, table: row.functions });
+      continue;
+    }
+    if (fns) u.functions = fns.map((f) => ({ functionId: f, label: null, prov: { status: 'PROPOSED', by: 'MODEL', ref: cardRef } }));
   }
+  return disagreements;
 }
 
 type AmountValue = { confirm?: true; notStated?: true; amount?: string };

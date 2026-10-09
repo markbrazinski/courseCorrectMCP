@@ -25,6 +25,16 @@ export function validateIntent(raw: unknown, ctx: InterpretContext): RescueInten
   };
 }
 
+/** An open question ("what do I use in place?") proposes nothing: only kinds the cook actually named survive. The model
+ *  sometimes adds its own ideas (live, 2026-10-08: whole milk, half-and-half and light cream for that question). */
+const OPEN_QUESTION = /\bwhat (?:can|could|do|should|would) (?:i|we) (?:use|try|put|substitute|swap)\b|\bwhat(?:'s| is| are) (?:a |the |some )?(?:good )?(?:substitutes?|replacements?|alternatives?)\b/i;
+const words = (s: string) => ` ${s.toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9']+/g, ' ').trim()} `;
+export function onlyNamed(intent: RescueIntent, utterance: string, ctx: InterpretContext): RescueIntent {
+  if (!OPEN_QUESTION.test(utterance.replace(/[’]/g, "'"))) return intent;
+  const said = words(utterance);
+  return { ...intent, proposedKindIds: intent.proposedKindIds.filter((id) => { const k = ctx.kinds.find((x) => x.id === id); return !!k && [k.label, ...k.aliases].some((n) => said.includes(words(n))); }) };
+}
+
 export const noneInterpreter: Interpreter = {
   mode: 'NONE',
   async interpret() { return { ok: false, reason: 'NO_INTERPRETER', summary: 'No interpreter configured; asked which ingredient instead.' }; },
@@ -94,7 +104,7 @@ export function novaInterpreter(nova: NovaClient, label = 'interpretation'): Int
         schema: interpretSchema(ctx), maxTokens: 300, timeoutMs: 20_000, reserveUsd: estimateUsd(Math.ceil((user.length / 3 + 800) * 1.5), 300) });
       if (!r.ok) return { ok: false, reason: r.error, summary: `NOVA interpreter: ${r.error}; asked which ingredient instead.`, latencyMs: r.latencyMs };
       const raw = r.input as Record<string, unknown>;
-      const intent = validateIntent({ ...raw, progressClaim: raw.claimedProgress === true ? 'The cook said some work is done (not recorded).' : null }, ctx);
+      const intent = onlyNamed(validateIntent({ ...raw, progressClaim: raw.claimedProgress === true ? 'The cook said some work is done (not recorded).' : null }, ctx), utterance, ctx);
       if (raw.referenceStatus !== 'RESOLVED') intent.missingIngredientId = null;   // ambiguous / unknown → closed reference question
       return { ok: true, intent, raw, latencyMs: r.latencyMs, summary: `NOVA interpreter (${r.latencyMs} ms): ${raw.referenceStatus}; missing = ${intent.missingIngredientId ?? '?'}; proposed = ${intent.proposedKindIds.join(', ') || 'none'}` };
     },

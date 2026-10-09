@@ -7,7 +7,7 @@ import { readPastedText, readPdf, type SourcePage } from '../../src/authoring/so
 import { swapUserMessage } from '../../src/authoring/swap-analysis.ts';
 import type { Vocabulary } from '../../src/contract/types.ts';
 import { makePdf } from './pdf.ts';
-import { RISOTTO_LINES, RISOTTO_READING, SCONE_LINES, SCONE_PDF_READING, SCONE_READING, SHORTCAKE_LINES, SHORTCAKE_READING } from './demo-sources.ts';
+import { DROP_LINES, DROP_READING, RISOTTO_LINES, RISOTTO_READING, SCONE_LINES, SCONE_PDF_READING, SCONE_READING, SHORTCAKE_LINES, SHORTCAKE_READING } from './demo-sources.ts';
 
 type Sib = { useRef: string; handling: 'coveredBy' | 'unchanged' | 'cantCover'; note: string };
 type Ing = { ingredient: string; kindId: string | null; amountText: string };
@@ -69,6 +69,17 @@ export const RISOTTO_CARDS = { cards: [
 ] };
 
 /** The three demo recipes as frozen probe inputs (PDFs from the current demo texts). */
+/** Drop biscuits (batch 1 browser evidence): the AI answers only; reviewed policies supersede the sugar, baking powder and milk,
+ *  and the flour card's oat-flour draft meets the D-5 record (shown as "drafted swap not offered"). */
+export const DROP_CARDS = { cards: [
+  swap('U1', 'the structure of the biscuits', ['STRUCTURE'], { ingredient: 'oat flour', kindId: null, amountText: '250 g' }, [], [['S2', 'Whisk 250 g oat flour, sugar, baking powder and salt.']], [],
+    'The biscuits will be denser and taste of oats.', 'Use 250 g oat flour for the plain flour.'),
+  omit('U2', 'sweetens the dough', ['SWEETNESS'], ['S2', 'Whisk the flour, baking powder and salt.'], [], 'The biscuits will be less sweet.', 'Leave the sugar out of step 2.'),
+  no('U3', 'makes the biscuits rise', ['LEAVENING'], 'No, because the baking powder makes the biscuits rise; without it they bake flat and dense.'),
+  omit('U4', 'seasons the dough', ['FLAVOR'], ['S2', 'Whisk the flour, sugar and baking powder.'], [], 'The biscuits will taste a little flatter.', 'Leave the salt out of step 2.'),
+  no('U5', 'the liquid in the dough', ['LIQUID'], 'No, because the milk is the liquid that brings the dough together; nothing else in this recipe can do that.'),
+] };
+
 export const DEMO = [
   { name: 'risotto', lines: RISOTTO_LINES, reading: RISOTTO_READING, cards: RISOTTO_CARDS },
   { name: 'scones', lines: SCONE_LINES, reading: SCONE_PDF_READING, cards: SCONE_CARDS },
@@ -100,6 +111,7 @@ export async function recordedDemo(v: Vocabulary) {
   };
   for (const d of DEMO) await add(d.reading, d.lines, d.cards);
   await add(SCONE_READING, SCONE_LINES, SCONE_CARDS);   // the hand-written scone text reading has its own (equivalent) message
+  await add(DROP_READING, DROP_LINES, DROP_CARDS);       // batch 1 browser evidence only (not in DEMO)
   readings[hash(userMessage(await pages(demoPdf(SCONE_LINES), true)))] = SCONE_PDF_READING;
   return { readings, cards };
 }

@@ -24,7 +24,12 @@ function lex(c: WhyCtx) {
   const n = (u: IngredientUse) => stepOrder(r, u.stepId);
   const short = (u: IngredientUse) => { const i = getIngredient(r, u.ingredientId)!; return (i.kind && kindOf(c.v, i.kind.kindId)?.short) || lowerFirst(i.name); };
   const roles = (u: IngredientUse) => and(u.functions.map((f) => f.label ?? functionLabel(c.v, f.functionId)));
-  const refusalOn = (id: Id) => c.pack.bindings.find((b) => b.kind === 'REFUSAL' && b.targetUseId === id);
+  // a use can carry several refusals (whipping cream: milk and butter; thin creams): the one naming the proposal first, then
+  // a replacement-specific one, then anything else (an omission refusal or a card's "no")
+  const refusalOn = (id: Id, P: Id[] = []) => {
+    const rs = c.pack.bindings.filter((b) => b.kind === 'REFUSAL' && b.targetUseId === id);
+    return rs.find((b) => P.length > 0 && b.refusal!.classes.length > 0 && sameSet(b.refusal!.classes, P)) ?? rs.find((b) => !b.refusal!.omission) ?? rs[0];
+  };
   const pattern = (e: { patternId: Id; patternVersion: number }) => c.patterns.find((p) => p.patternId === e.patternId && p.version === e.patternVersion);
   return { r, use, n, short, roles, refusalOn, pattern };
 }
@@ -44,7 +49,13 @@ export function missingText(c: WhyCtx, m: MissingFact): string {
     return `the ${what} ${unit} ${m.subject.kind === 'USE' && u ? `in step ${n(u)}` : 'in the ingredient list'}`;
   }
   if (m.predicate === 'KIND_CLASS') return `confirmation that “${getIngredient(r, m.subject.id)?.name ?? m.subject.id}” is ${classLabel(c.v, m.expected)}`;
-  if (m.predicate === 'TECHNIQUE') return `step ${stepOrder(r, m.subject.id)} recognized as “${techLabel(c.v, m.expected)}”`;
+  // source completeness (closure 2026-10-08): what of the original method the steps as read don't account for
+  if (m.predicate === 'SOURCE_COVERAGE') {
+    const n = stepOrder(r, m.subject.id), ex = m.expected.length > 70 ? `${m.expected.slice(0, 67)}…` : m.expected;
+    return m.expected === 'NOT_ASSESSED' ? `the method around step ${n} wasn't checked against the original` : m.expected === 'NOT_FOUND' ? `step ${n}'s wording wasn't found in the original` : `“${ex}” before step ${n} isn't in the steps as read`;
+  }
+  if (m.predicate === 'TIMING') return `the time “${m.expected}” in step ${stepOrder(r, m.subject.id)} isn't accounted for`;
+  if (m.predicate === 'TECHNIQUE') return c.v.techniques.some((x) => x.techniqueId === m.expected) ? `step ${stepOrder(r, m.subject.id)} recognized as “${techLabel(c.v, m.expected)}”` : `step ${stepOrder(r, m.subject.id)} recognized (what it does wasn't confirmed)`;
   const u = use(m.subject.id);
   return u ? `the ${short(u)}'s role in step ${n(u)} (${functionLabel(c.v, m.expected)}) on the role table` : `a role on the role table`;
 }
@@ -68,12 +79,17 @@ export function checkText(c: WhyCtx, e: CoverageEntry): string {
   if (code === 'APPLICABILITY') {
     const pr = JSON.parse(detail) as Predicate;
     if (pr.kind === 'AMOUNT_IN_RANGE') return `the swap is reviewed only for ${formatRational(pr.min)}–${formatRational(pr.max)} ${unitText(pr.unit)}${pr.slot === '$target' && target ? `; this recipe uses ${amountDisplay(target.amount)}` : ''}`;
+    if (pr.kind === 'RECIPE_HAS_USE_OF_CLASS') return pr.expect ? `the swap needs ${classLabel(c.v, pr.classId)} in the recipe` : `the recipe also has ${classLabel(c.v, pr.classId)}, which the swap doesn't account for`;
+    if (pr.kind === 'NO_HOLD_BETWEEN') return `the recipe rests or chills before baking, and the swap has to be baked straight away`;
     return `this recipe doesn't meet the swap's conditions`;
   }
   if (code.startsWith('SLOT_')) {
     const s = p?.slots.find((x) => x.slot === code.split(':')[1]);
     const what = !s ? 'step' : 'technique' in s ? `“${techLabel(c.v, s.technique)}” step ${s.kind === 'STEP_BEFORE_TARGET' ? 'before' : 'after'} step ${target ? n(target) : '?'}` : `${classLabel(c.v, s.ingredientClass)} use`;
-    return code.startsWith('SLOT_NONE') ? `this recipe has no ${what}, which the swap needs` : `more than one ${what} could be the one the swap needs`;
+    // a slot found nowhere in an import is about this reading (a step's technique may not have been recognized), never proof
+    // about the recipe; an owner-authored recipe is as written
+    if (code.startsWith('SLOT_NONE')) return r.source?.rights === 'OWNER_AUTHORED' ? `this recipe has no ${what}, which the swap needs` : `this reading has no recognized ${what}, which the swap needs`;
+    return `more than one ${what} could be the one the swap needs`;
   }
   if (code.startsWith('EXCEPTION:')) return lowerFirst(detail);
   if (code === 'CONTRADICTORY_PROPOSAL_CLAIMS') return 'two reviewed rules disagree about this use';
@@ -115,11 +131,6 @@ export function swapOf(c: WhyCtx, useId: Id): WireSwap {
   }
   const cc = coverOf(true);
   if (cc) return C(cc);
-  const ref = c.pack.bindings.find((b) => b.kind === 'REFUSAL' && b.targetUseId === useId && !b.card);
-  if (ref?.refusal) {
-    const k = getIngredient(c.pack.recipe, u.ingredientId)?.kind?.kindId, cls = k ? classesOfKind(c.v, k)[0] : undefined;
-    return R({ kind: 'refusal', text: `No swap: ${ref.refusal.requiredFunctionLabel} needs ${cls ? classLabel(c.v, cls) : 'this ingredient'}`, details: [ref.refusal.text] });
-  }
   const no = c.pack.bindings.find((b) => b.kind === 'REFUSAL' && b.targetUseId === useId && b.card);
   if (no?.card) return C({ kind: 'refusal', text: no.card.opinion, details: [] });
   const entries = c.pack.coverage.filter((e) => e.targetUseId === useId);
@@ -130,6 +141,10 @@ export function swapOf(c: WhyCtx, useId: Id): WireSwap {
     return failed ? C({ ...x, text: `${couldnt}. A reviewed swap needs ${and(needs)}` }) : R({ ...x, text: `No swap prepared: needs ${and(needs)}` });
   }
   if (failed) return C({ kind: 'none', text: couldnt, details: [] });
+  // a reviewed refusal answers one replacement only (G13): said as such, never as "no swap", and only where nothing else
+  // answered this use; leaving-it-out refusals refuse no replacement
+  const ref = c.pack.bindings.find((b) => b.kind === 'REFUSAL' && b.targetUseId === useId && !b.card && !b.refusal?.omission);
+  if (ref?.refusal) return R({ kind: 'refusal', text: `One swap ruled out: ${ref.patternTitle.toLowerCase()}`, details: [ref.refusal.text, ref.refusal.scopeNote] });
   const out = entries.filter(ruledOut);
   if (out.length) return R({ kind: 'none', text: `No swap prepared: ${out.map((e) => checkText(c, e)).join('; ')}`, details: out.map((e) => `Considered: ${e.patternTitle}`) });
   return { kind: 'none', text: 'No swap prepared', details: [], origin: null, label: null, ...words };
@@ -146,9 +161,11 @@ export function refusalWhy(c: WhyCtx, res: EvaluationResult, proposedKindIds: Id
   const cardNo = rf.code === 'NOT_FUNCTIONALLY_EQUIVALENT' && tu ? c.pack.bindings.find((b) => b.kind === 'REFUSAL' && b.card && b.targetUseId === tu.useId && b.refusal!.text === rf.message) : undefined;
   // every remaining use of the ingredient: its role, what the reviewed rules say there, and whether the proposal fits
   const uses = t ? t.allRemainingUses.map((x) => use(x.useId)).filter((u): u is IngredientUse => !!u) : [];
+  // a use whose own refusal answers the proposal is explained there; other reasons about that use would only repeat it
+  const answered = new Set(uses.filter((u) => { const x = refusalOn(u.useId, P)?.refusal; return !!x && P.length > 0 && (x.classes.length === 0 || sameSet(x.classes, P)); }).map((u) => u.useId));
   for (const u of uses) {
     const title = getStep(r, u.stepId)?.title, where = `In step ${n(u)}${title ? ` (${title})` : ''}`;
-    const refusal = refusalOn(u.useId), techId = getStep(r, u.stepId)?.technique?.techniqueId;
+    const refusal = refusalOn(u.useId, P), techId = getStep(r, u.stepId)?.technique?.techniqueId;
     const entries = c.pack.coverage.filter((e) => e.targetUseId === u.useId && e.kind === 'RECOVERY');
     const fits = entries.find((e) => { const p = pattern(e); return P.length > 0 && p?.kind === 'RECOVERY' && p.proposal?.relation === 'REALIZED_AS_PROPOSED' && sameSet(p.proposal.classes, P); });
     if (u === tu && cardNo) {
@@ -156,17 +173,31 @@ export function refusalWhy(c: WhyCtx, res: EvaluationResult, proposedKindIds: Id
     } else if (refusal?.refusal) {
       const job = techId ? techLabel(c.v, techId) : refusal.refusal.requiredFunctionLabel;
       const matched = P.length > 0 && (refusal.refusal.classes.length === 0 || sameSet(refusal.refusal.classes, P));
-      facts.push(`${where} the ${short(u)} is used to ${job} (${refusal.refusal.requiredFunctionLabel}); ${matched ? `${said} can't ${job}` : refusal.card ? `the import analysis found nothing that can replace it` : 'no reviewed swap covers that'}`);
-      if (u === tu && rf.code === 'NOT_FUNCTIONALLY_EQUIVALENT') facts.push(rf.message);   // authored reason, verbatim
+      const head = refusal.refusal.answer ? `${where} the ${short(u)} is the ${refusal.refusal.requiredFunctionLabel}` : `${where} the ${short(u)} is used to ${job} (${refusal.refusal.requiredFunctionLabel})`;
+      const authored = u === tu && rf.code === 'NOT_FUNCTIONALLY_EQUIVALENT';
+      // the authored reason already names the job and why the proposal can't do it, so it's said once. A proposal no rule
+      // answers is never called unsuitable: CourseCorrect can't confirm it (chilled coconut cream does whip, for one)
+      if (!(authored && matched)) facts.push(`${head}; ${matched ? `${said} ${refusal.refusal.answer ?? `can't ${job}`}` : refusal.card ? `the import analysis found nothing that can replace it` : said ? `CourseCorrect can't confirm that ${said} will do that, and it has no other option to suggest` : `CourseCorrect has no option it can confirm for that`}`);
+      if (authored) facts.push(rf.message);   // authored reason, verbatim
       if (P.length) answers.push(`step ${n(u)}: ${matched ? 'no' : 'not reviewed'}`);
     } else if (fits) {
       facts.push(`${where} the ${short(u)} is the ${roles(u)}; ${said} can do that job`);
       if (P.length) answers.push(`step ${n(u)}: ${fits.status === 'BOUND' ? 'yes' : 'would work on its own'}`);
     } else if (P.length) answers.push(`step ${n(u)}: not reviewed`);
     if (u === tu || rf.code === 'NO_SUPPORTED_RECOVERY') {
-      for (const e of entries.filter(ruledOut)) facts.push(checkText(c, e));
-      const needs = entries.filter((e) => e.status === 'NEEDS_FACTS').flatMap((e) => e.missing.map((m) => missingText(c, m)));
+      const all = entries.filter(ruledOut);
+      for (const e of all) {
+        const code = e.failedCheck?.code ?? '';
+        if (code === 'TOTAL_BASE_REQUIRES_ALL_USES_COVERED' && e.failedCheck!.detail.split(', ').every((id) => answered.has(id))) continue;
+        // two versions of one rule: the specific reason, not that this version's shape doesn't fit
+        if (code.startsWith('SLOT_NONE') && all.some((o) => o.patternId === e.patternId && !(o.failedCheck?.code ?? '').startsWith('SLOT_NONE'))) continue;
+        facts.push(checkText(c, e));
+      }
+      const waiting = entries.filter((e) => e.status === 'NEEDS_FACTS').flatMap((e) => e.missing);
+      const read = (m: MissingFact) => m.predicate === 'SOURCE_COVERAGE' || m.predicate === 'TIMING';
+      const needs = waiting.filter((m) => !read(m)).map((m) => missingText(c, m)), unread = waiting.filter(read).map((m) => missingText(c, m));
       if (needs.length) facts.push(`the swap for step ${n(u)} needs ${and([...new Set(needs)])}, which this recipe doesn't state`);
+      if (unread.length) facts.push(`the swap for step ${n(u)} needs the original method read in full, and it wasn't: ${and([...new Set(unread)])}`);
     }
   }
   const NOT_NOW = ['PROTECTED_WORK', 'AFFECTED_USE_IN_PROGRESS', 'NOT_APPLICABLE_NOW', 'CONFLICTS_WITH_EARLIER_CHANGE', 'SUCCESSIVE_RESCUE_UNSUPPORTED', 'INSUFFICIENT_AVAILABILITY', 'NOTHING_TO_CHANGE'];

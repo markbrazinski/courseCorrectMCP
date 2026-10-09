@@ -3,6 +3,7 @@ import type {
   Amount, Candidate, EvaluationResult, Id, IngredientUse, Pattern, Recipe, RecipePack, Refusal, StepStatus, UseStatus, Vocabulary,
 } from './types.ts';
 import { swapOf, type WireSwap, type Why } from './why.ts';
+import { analysisOf, type ImportPlan, type UseAnalysis } from './analysis.ts';
 import { CARD_LABEL } from '../compile/cards.ts';
 import { formatRational } from '../domain/rational.ts';
 import { allowanceText, amountDisplay, getIngredient, getStep, lowerFirst, qtyText, renderStep, stepOrder, upperFirst, useLabel } from '../domain/recipe.ts';
@@ -17,12 +18,13 @@ export type WireAmount =
   | { kind: 'toTaste'; display: string }
   | { kind: 'count'; value: number; display: string }
   | { kind: 'unresolved'; display: string | null; reason: string };
-export type { WireSwap, Why };
+export type { WireSwap, Why, UseAnalysis, ImportPlan };
 export interface WireUse {
   id: Id; ingredientId: Id; stepId: Id; amount: WireAmount; prepares: Id | null;
   proposedFunction: { labels: string[]; origin: 'import-inference' } | null;   // display only ("import guessed …")
-  reviewedFunction: { labels: string[]; reviewId: string } | null;
+  reviewedFunction: { labels: string[]; reviewId: string; authority: 'MACHINE_CHECKED' | 'OWNER_REVIEWED' } | null;   // R-1: the role table's roles are MACHINE_CHECKED
   swap: WireSwap; sourceRef: null;
+  analysis: UseAnalysis | null;   // import review only (drafts and recipe pages); null on cooking responses
 }
 export interface WireIngredient { id: Id; name: string; totalAmount: WireAmount; uses: WireUse[]; sourceRef: null; removedByAmendment: boolean }
 export interface WireStep { id: Id; ordinal: number; title: string; text: string; useIds: Id[]; duration: { seconds: number; display: string; sourceText: string | null } | null; dependsOn: Id[]; sourceRef: null }
@@ -92,7 +94,9 @@ export function wireAmount(a: Amount, u?: IngredientUse): WireAmount {
 }
 const labelsOf = (v: Vocabulary, u: IngredientUse) => u.functions.map((f) => f.label ?? functionLabel(v, f.functionId));
 
-export function recipeContent(r: Recipe, v: Vocabulary, pack: RecipePack, v1: Recipe, patterns: Pattern[]): RecipeContent {
+/** `analysis`: add each use's import analysis (Amendment 1); `pending` while the import's swap analysis is still running. */
+export function recipeContent(r: Recipe, v: Vocabulary, pack: RecipePack, v1: Recipe, patterns: Pattern[], analysis?: { pending: boolean }): RecipeContent {
+  const memo = new Map<Id, ImportPlan | null>();
   const steps: WireStep[] = r.steps.map((s, i) => ({
     id: s.stepId, ordinal: i + 1, title: s.title ?? `Step ${i + 1}`, text: renderStep(r, s),
     useIds: r.uses.filter((u) => u.stepId === s.stepId).map((u) => u.useId), duration: s.duration, dependsOn: s.dependsOn, sourceRef: null,
@@ -106,8 +110,9 @@ export function recipeContent(r: Recipe, v: Vocabulary, pack: RecipePack, v1: Re
       uses: uses.map((u) => ({
         id: u.useId, ingredientId: u.ingredientId, stepId: u.stepId, amount: wireAmount(u.amount, u), prepares: u.preparesUseId,
         proposedFunction: u.functions.some((f) => f.prov.status !== 'REVIEWED') ? { labels: labelsOf(v, u), origin: 'import-inference' } : null,
-        reviewedFunction: u.functions.length && u.functions.every((f) => f.prov.status === 'REVIEWED') ? { labels: labelsOf(v, u), reviewId: u.functions[0].prov.ref ?? 'reviewed' } : null,
+        reviewedFunction: u.functions.length && u.functions.every((f) => f.prov.status === 'REVIEWED') ? { labels: labelsOf(v, u), reviewId: u.functions[0].prov.ref ?? 'reviewed', authority: u.functions.every((f) => f.prov.by === 'OWNER') ? 'OWNER_REVIEWED' : 'MACHINE_CHECKED' } : null,
         swap: swapOf({ pack, patterns, v }, u.useId), sourceRef: null,
+        analysis: analysis ? analysisOf({ pack, patterns, v }, u.useId, analysis.pending, memo) : null,
       })),
     };
   });

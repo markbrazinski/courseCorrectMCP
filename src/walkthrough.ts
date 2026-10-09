@@ -20,14 +20,13 @@ type J = Record<string, any>;   // eslint-disable-line @typescript-eslint/no-exp
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const outDir = join(import.meta.dirname, '../.artifacts/walkthrough');
 mkdirSync(outDir, { recursive: true });
-const adminToken = randomUUID();
 const content = loadContent();
 const svc = new Service({ dbPath: join(outDir, `m1-${stamp}.db`), content, interpreter: noneInterpreter, fixtureRecipes: false });
 const rec = await recordedDemo(content.vocab);
 const authoring = new Authoring({ store: svc.store, content, extractor: recordedExtractor(rec.readings, 'RECORDED_FIXTURES'), analyzer: recordedAnalyzer(rec.cards, 'RECORDED_FIXTURES') });
 svc.catalog = () => authoring.catalog();
 const port = 18000 + Math.floor(Math.random() * 1000);
-const server = await startHttp(svc, { port, adminToken, authoring });
+const server = await startHttp(svc, { port, ownerToken: randomUUID(), authoring });
 const client = new Client({ name: 'm1-walkthrough', version: '0.1.0' });
 await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
 
@@ -60,9 +59,9 @@ const ask = (run: J, re: RegExp, proposedKindIds: string[] = [], extra: J = {}) 
   call('evaluate_rescue', { commandId: randomUUID(), ...scope(run), missingIngredientId: ing(re), proposedKindIds, utterance: { text: re.source, channel: 'tapped' }, ...extra });
 
 try {
-  const unauth = await fetch(`http://127.0.0.1:${port}/admin/reset`, { method: 'POST', body: '{}' });
+  const unauth = await fetch(`http://127.0.0.1:${port}/admin/start-over`, { method: 'POST', body: '{}' });
   beat = 'setup'; console.log('\n== setup: import the three demo PDFs (RECORDED readings and swap-card fixtures)');
-  check(unauth.status === 401, 'admin reset refuses without the bearer token');
+  check(unauth.status === 401, 'start over refuses without the owner key');
   for (const d of DEMO) {
     const r = await authoring.createImport({ kind: 'pdf', bytes: demoPdf(d.lines), filename: `${d.name}.pdf` });
     if (r.status !== 202) throw new Error('import');

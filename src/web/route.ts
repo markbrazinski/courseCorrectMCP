@@ -32,7 +32,8 @@ export function route(raw: string): Routed {
   if (/^(read( it)?( again)?|repeat( that)?|again|say (it|that) again)$/.test(t)) return { kind: 'read' };
   if (/^what do i need$/.test(t)) return { kind: 'ingredients' };
   // explicit acceptance only: a "use/apply/accept this change" phrase, never with a negation, never a bare yes
-  if (/\b(use|apply|accept|take) (this|the|that) change\b/.test(t) && !/\b(not|\w+n't|never|no)\b/.test(t)) return { kind: 'accept' };
+  // speech recognition often hears the short command a little off ("used this change", "use this chain", "use the changes")
+  if (/\b(use[sd]?|using|apply|accept|take) (?:(this|the|that|these) )?(change|changes|chain)\b/.test(t) && !/\b(not|\w+n't|never|no)\b/.test(t)) return { kind: 'accept' };
   if (/^(yes|yeah|yep|yes please|ok|okay|sure|i do|i have them|i have it)$/.test(t)) return { kind: 'yes' };   // FE §6.2: never an acceptance
   if (/^(no|nope|i don't|not enough)$/.test(t)) return { kind: 'no' };
   if (/^check (the )?status$/.test(t)) return { kind: 'checkStatus' };
