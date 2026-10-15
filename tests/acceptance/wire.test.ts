@@ -49,7 +49,7 @@ describe('FE–BE v1 wire fixtures (B32)', () => {
       ['Lemon juice', 'Step 7', '—', '10 ML', 'added'],
     ]);
     expect(c.consequence).toEqual({ text: 'The risotto will taste different, and it won’t have the aroma of white wine.'.replace('’', "'"), contentSlot: false });
-    expect(c.contentLabel).toBe('Engineering content · provisional quantities · not released cooking guidance');
+    expect(c.contentLabel).toBe('Reviewed change');
     expect(c).toMatchObject({ resumeStepId: STEP['r.deglaze'], applicable: { kind: 'yes' } });
 
     // §7.5

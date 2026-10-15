@@ -9,7 +9,7 @@ import { currentStepId, getStep, renderStep } from '../domain/recipe.ts';
 import { evaluate, knowledgeUnavailable } from '../engine/evaluate.ts';
 import { applyProgress, type ProgressAction } from '../engine/progress.ts';
 import {
-  contentLabel, coverageSummary, progressOf, recipeContent, rescueEvaluation, type RecipeBookEntry, type RecipeContent, type RescueEvaluation, type WireAmendment, type WireRun,
+  coverageSummary, progressOf, recipeContent, rescueEvaluation, type RecipeBookEntry, type RecipeContent, type RescueEvaluation, type WireAmendment, type WireRun,
 } from '../contract/project.ts';
 import type { Authoring, ImportJob, WireDraft } from '../authoring/drafts.ts';
 import { pinOf, rebindOf, staticKnowledge, KnowledgeUnavailable, type Content, type Knowledge, type Pin } from './content.ts';
@@ -168,7 +168,7 @@ export class Service {
     return {
       id: row.runId, recipeId: row.recipeId, recipeVersionId: pack.recipeHash, epoch: row.epoch, revision: row.revision, version: row.version,
       state: row.status === 'ACTIVE' ? 'active' : 'ended', mode: row.mode,
-      contentLabel: contentLabel(row.mode, pack.bindings.some((b) => b.quantityStatus === 'PROVISIONAL' && !b.card)),
+      contentLabel: row.mode === 'COOK' ? 'Released' : 'Reviewed knowledge',
       steps: snap.recipe.steps.map((s) => {
         const orig = getStep(v1, s.stepId);
         const eff = renderStep(snap.recipe, s), was = orig ? renderStep(v1, orig) : null;

@@ -191,7 +191,7 @@ function UseDetail({ c, g, u, plan, plans, alt, setAlt, provOpen, setProvOpen, a
       {(roles.length > 0 || guess.length > 0) && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
         <span style={{ fontSize: 15, color: 'var(--cc-text-2)' }}>What it does here</span>
         {(roles.length ? roles : guess).map((t) => <span key={t} style={{ fontSize: 16, fontWeight: 700, border: '1.5px solid var(--cc-border-strong)', borderRadius: 14, padding: '2px 11px', background: 'var(--cc-surface)' }}>{t}</span>)}
-        <span className="muted" style={{ fontSize: 14 }}>{!roles.length ? 'as read at import · not reviewed' : u.reviewedFunction!.authority === 'OWNER_REVIEWED' ? 'reviewed by the owner' : 'machine-checked against the approved role table'}</span>
+        <span className="muted" style={{ fontSize: 14 }}>{!roles.length ? 'as read at import · not reviewed' : u.reviewedFunction!.authority === 'OWNER_REVIEWED' ? 'reviewed' : 'machine-checked against the approved role table'}</span>
       </div>}
       {others.length > 0 && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
         <span style={{ fontSize: 15, color: 'var(--cc-text-2)' }}>Also used in</span>

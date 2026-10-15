@@ -42,7 +42,7 @@ describe('every use has exactly one analysis status', () => {
     expect(dough.analysis).toMatchObject({ status: 'available', reason: null, coveredByUseId: null, sharedWithUseIds: [brush.id] });
     const p = dough.analysis!.plans[0];
     expect(p).toMatchObject({ ruleId: 'cream_to_butter_milk@1', title: 'Butter and milk for cream in a dough', provenance: { kind: 'reviewedRule', label: 'Reviewed change' },
-      contentStatus: { label: 'Engineering content · provisional quantities · not released cooking guidance', provisional: true },
+      contentStatus: { label: 'Reviewed change', provisional: true },
       consequence: { text: 'These become butter scones: the texture will be a little less rich and tender than cream scones.' } });
     expect(p.replacements.map((x) => [x.ingredientName, x.amount.display, x.preparation])).toEqual(expect.arrayContaining([
       ['Butter', '85 g', 'cold'], ['Milk', '180 ML, plus up to 30 ML more if needed', null], ['Milk', 'a little', null]]));

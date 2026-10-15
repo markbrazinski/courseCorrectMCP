@@ -10,7 +10,7 @@ const ingCard = (page: Page, name: string) => page.locator('nav div').filter({ h
 async function startScones(page: Page) {
   expect((await page.request.post('/admin/reset', { headers: { authorization: 'Bearer e2e-admin-key' }, data: { fixtureId: 'risotto.step5' } })).ok()).toBeTruthy();
   await page.goto('/');
-  await page.getByRole('button', { name: /Cream Scones/ }).filter({ hasText: 'Owner-authored' }).first().click();
+  await page.getByRole('button', { name: /Cream Scones/ }).filter({ hasText: 'CourseCorrect recipe' }).first().click();
   await page.getByRole('button', { name: 'Start cooking' }).click();
   await page.getByRole('button', { name: /^End it and start/ }).click();
   await expect(scr(page).getByText(/^Step 1 of \d+/)).toBeVisible();

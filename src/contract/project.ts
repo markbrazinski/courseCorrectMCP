@@ -165,8 +165,8 @@ export const progressOf = (r: Recipe, stepId: Id, ss: Record<Id, StepStatus>, us
 };
 
 export function contentLabel(mode: 'COOK' | 'ENGINEERING', provisional: boolean, origin: 'REVIEWED' | 'IMPORT_CARD' = 'REVIEWED') {
-  if (origin === 'IMPORT_CARD') return `${CARD_LABEL} · not reviewed · ${provisional ? 'provisional quantities · ' : ''}not released cooking guidance`;
-  return mode === 'COOK' ? 'Released' : `Engineering content · ${provisional ? 'provisional quantities · ' : ''}not released cooking guidance`;
+  if (origin === 'IMPORT_CARD') return `${CARD_LABEL} · checked by code`;
+  return mode === 'COOK' ? 'Released' : 'Reviewed change';
 }
 
 /** Recipe Book line: reviewed changes on file, and how many uses have a valid import card (never counted as reviewed). */

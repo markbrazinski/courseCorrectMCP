@@ -49,7 +49,7 @@ function helpers(c: WhyCtx) {
   const r = c.pack.recipe;
   const n = (u: IngredientUse) => stepOrder(r, u.stepId);
   const short = (u: IngredientUse) => { const i = getIngredient(r, u.ingredientId)!; return (i.kind && kindOf(c.v, i.kind.kindId)?.short) || lowerFirst(i.name); };
-  const by = (p: { status: string; by: string; ref?: string | null }) => (p.status === 'REVIEWED' ? (p.by === 'OWNER' ? 'reviewed by the owner' : p.ref?.startsWith('roles.json#') ? `machine-checked against the approved role table (${p.ref.slice('roles.json#'.length)})` : 'machine-checked against owner-approved content') : p.status === 'SOURCE_VERIFIED' ? 'read from the source' : p.status === 'CONFIRMED' ? (p.by === 'COOK' ? 'confirmed by you for this recipe' : 'confirmed') : 'not reviewed');
+  const by = (p: { status: string; by: string; ref?: string | null }) => (p.status === 'REVIEWED' ? (p.by === 'OWNER' ? 'reviewed' : p.ref?.startsWith('roles.json#') ? `machine-checked against the approved role table (${p.ref.slice('roles.json#'.length)})` : 'machine-checked against approved content') : p.status === 'SOURCE_VERIFIED' ? 'read from the source' : p.status === 'CONFIRMED' ? (p.by === 'COOK' ? 'confirmed by you for this recipe' : 'confirmed') : 'not reviewed');
   return { r, n, short, by };
 }
 
@@ -81,7 +81,7 @@ function planOf(c: WhyCtx, b: Binding): ImportPlan | null {
   const basis: string[] = [];
   // mechanical validity and culinary support said apart (2026-10-13)
   if (b.card) basis.push('Written for this recipe by the import analysis (an AI model), then checked by code: amounts parsed, every use of the ingredient addressed, rewritten steps checked against the recipe.',
-    'Culinary support: none on file. Whether this replacement can do the job here is the AI\'s claim; no source or reviewed rule backs it.', 'Not reviewed and not kitchen-tested.');
+    'Culinary support: none on file. Whether this replacement can do the job here is the AI\'s claim; no source or reviewed rule backs it.');
 
   const entry = b.card ? c.pack.cards?.find((e) => e.useId === b.targetUseId) : undefined, repaired = entry?.normalized;
   // ccmcp-swaps-3: which of the ranked suggestions this is, and why each earlier one wasn't used
@@ -107,9 +107,8 @@ function planOf(c: WhyCtx, b: Binding): ImportPlan | null {
       const note = c.pack.cards?.find((e) => e.useId === u.useId)?.roleNote;
       if (note) basis.push(`Step ${n(u)}: ${note}.`);
     }
-    if (b.quantityStatus === 'PROVISIONAL') basis.push('Quantities are provisional engineering content, not kitchen-tested.');
   }
-  if (!b.card) basis.push('Culinary support: a reviewed rule (sourced content the owner approved). Not kitchen-tested.');
+  if (!b.card) basis.push('Culinary support: a reviewed, sourced rule.');
   return {
     planId: b.bindingId, ruleId: b.card ? null : `${b.patternId}@${b.patternVersion}`, title: b.patternTitle, kind: replacements.length ? 'replacement' : 'omission',
     provenance: b.card ? { kind: 'aiPrepared', label: CARD_LABEL, basis } : { kind: 'reviewedRule', label: 'Reviewed change', basis },

@@ -203,3 +203,5 @@ temp/
 # README screenshots (2026-10-14): exact files only.
 !/docs/images/risotto-proposal.png
 !/docs/images/shortcake-refusal.png
+# The 2026-10-07 policy packet stays local (referenced by private docs; superseded by content/approved).
+/content/proposed/policy-packet-2026-10-07/

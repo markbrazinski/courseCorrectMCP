@@ -5,7 +5,7 @@
   "meta": "Makes 8 · about 30 minutes",
   "volumeSystem": "METRIC",
   "source": {
-    "label": "Owner-authored engineering recipe (HF v1 fixture; step 6 titled for brushing)",
+    "label": "CourseCorrect recipe",
     "rights": "OWNER_AUTHORED"
   },
   "decisionRef": "content-decisions.md#OD-3",

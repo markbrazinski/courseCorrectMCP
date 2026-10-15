@@ -81,7 +81,7 @@ try {
   const e1 = await ask(run, /wine/i, ['lemon-juice']);
   check(e1.outcome === 'needsFacts' && e1.questions[0].items.length === 2, 'needsFacts: 120 ML stock and 10 ML lemon juice');
   const e2 = await ask(run, /wine/i, ['lemon-juice'], { previousEvaluationId: e1.id, answers: [{ questionId: e1.questions[0].id, value: 'yes' }] });
-  check(e2.outcome === 'proposal' && e2.actionable === true && /^Engineering content/.test(e2.candidates[0].contentLabel), 'reviewed proposal, actionable; answering applied nothing');
+  check(e2.outcome === 'proposal' && e2.actionable === true && /^Reviewed change/.test(e2.candidates[0].contentLabel), 'reviewed proposal, actionable; answering applied nothing');
   const cand = e2.candidates[0];
   const applyArgs = { commandId: randomUUID(), ...scope(run), evaluationId: e2.id, candidateId: cand.id, planId: cand.planId, accepted: true };
   const ap = await call('apply_amendment', applyArgs);

@@ -78,7 +78,7 @@ test('Risotto rescue: question → yes → proposal (consequence beside acceptan
   await expect(consequence).toBeInViewport();
   await expect(use).toBeInViewport();
   await expect(scr(page).getByText('Proposed change · not applied')).toBeVisible();
-  await expect(scr(page).getByText(/Engineering content · provisional quantities · not released cooking guidance/)).toBeVisible();
+  await expect(scr(page).getByText(/Reviewed change/)).toBeVisible();
   await expect(scr(page).getByText('After you accept: step 5, not started until you report it.')).toBeVisible();
   await page.screenshot({ path: '.artifacts/e2e/shots/risotto-proposal-1440.png' });
 
@@ -150,7 +150,7 @@ test('Shortcake step 4: "No", because the same cream must whip in step 6 (reason
 
 test('Scone recovery (approved demo): brushing milk confirmed separately → apply → step 3 not started', async ({ page }) => {
   await reset(page, 'risotto.step5');
-  await start(page, /Cream Scones/, 'Owner-authored');
+  await start(page, /Cream Scones/, 'CourseCorrect recipe');
   await doneThrough(page, 2);
   await say(page, 'I’m out of heavy cream. Can I use milk and butter?');
   const qs = page.getByTestId('question');
@@ -370,7 +370,7 @@ test('Import cards: the imported risotto\'s Parmesan card is a labelled plan →
   await expect(page.getByTestId('question')).toContainText('50 g grated pecorino');
   await page.getByRole('button', { name: 'Yes', exact: true }).click();
   await expect(page.getByTestId('change-7')).toHaveText('Off the heat, stir in 30 g butter and 50 g grated pecorino. Season with salt.');
-  await expect(scr(page).getByText(/^Prepared at import \(AI\) · not reviewed · provisional quantities · not released cooking guidance$/)).toBeVisible();
+  await expect(scr(page).getByText(/^Prepared at import \(AI\) · checked by code$/)).toBeVisible();
   await expect(page.getByTestId('consequence')).toHaveText('Pecorino is saltier and sharper, so taste before adding salt.');
   await page.waitForTimeout(600);
   await page.screenshot({ path: '.artifacts/e2e/shots/cook-card-proposal.png' });
@@ -526,7 +526,7 @@ test('Activity starts blank for each recipe; start over (owner key) clears sessi
 
 test('Scone by spoken-style replies: a plain yes answers one question and prompts the next; "yes to both" answers all; "let’s use this change" applies', async ({ page }) => {
   await reset(page, 'risotto.step5');
-  await start(page, /Cream Scones/, 'Owner-authored');
+  await start(page, /Cream Scones/, 'CourseCorrect recipe');
   await doneThrough(page, 2);
   await say(page, 'I’m out of heavy cream. Can I use milk and butter?');
   await expect(page.getByTestId('question')).toHaveCount(2);
@@ -539,7 +539,7 @@ test('Scone by spoken-style replies: a plain yes answers one question and prompt
   await expect(scr(page).getByText(/Change applied\. Step 3 is ready, not started/)).toBeVisible();
   // the same request answered in one go
   await reset(page, 'risotto.step5');
-  await start(page, /Cream Scones/, 'Owner-authored');
+  await start(page, /Cream Scones/, 'CourseCorrect recipe');
   await doneThrough(page, 2);
   await say(page, 'I’m out of heavy cream. Can I use milk and butter?');
   await expect(page.getByTestId('question')).toHaveCount(2);   // answer the open questions, not a new request

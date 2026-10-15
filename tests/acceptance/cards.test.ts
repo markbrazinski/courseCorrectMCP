@@ -106,7 +106,7 @@ describe('cooking answers come from cards, with no model call beyond interpretat
     const wine = await k.askAll(/wine/i, 'yes', ['lemon-juice']);
     expect(wine.outcome).toBe('proposal');
     if (wine.outcome !== 'proposal') return;
-    expect(wine.candidates[0]).toMatchObject({ headline: 'Use hot stock now and lemon juice at the finish instead of the wine.', contentLabel: 'Engineering content · provisional quantities · not released cooking guidance' });
+    expect(wine.candidates[0]).toMatchObject({ headline: 'Use hot stock now and lemon juice at the finish instead of the wine.', contentLabel: 'Reviewed change' });
 
     const p = await cookTo(svc, saved.risotto.recipeId, 6);
     const e1 = await p.ask(/parmesan/i);
@@ -115,7 +115,7 @@ describe('cooking answers come from cards, with no model call beyond interpretat
     expect(e1.questions.map((q) => q.items.map((i) => i.text))).toEqual([['50 g grated pecorino']]);
     const e2 = await p.ask(/parmesan/i, [], { id: e1.id, answers: [{ questionId: e1.questions[0].id, value: 'yes' }] });
     if (e2.outcome !== 'proposal') throw new Error(e2.outcome);
-    expect(e2.candidates[0]).toMatchObject({ headline: 'Use 50 g grated pecorino instead of the parmesan in step 7.', contentLabel: 'Prepared at import (AI) · not reviewed · provisional quantities · not released cooking guidance',
+    expect(e2.candidates[0]).toMatchObject({ headline: 'Use 50 g grated pecorino instead of the parmesan in step 7.', contentLabel: 'Prepared at import (AI) · checked by code',
       consequence: { text: 'Pecorino is saltier and sharper, so taste before adding salt.' } });
     expect(e2.trace.deterministic).toMatch(/^Prepared at import \(AI\): Grated pecorino for the parmesan/);
     const a = (await apply(svc, e2));
