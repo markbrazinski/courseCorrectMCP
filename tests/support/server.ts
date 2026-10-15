@@ -16,12 +16,14 @@ import { recordedExtractor, type Extractor } from '../../src/authoring/extract.t
 import { Ledger, NovaClient, type Authorization } from '../../src/authoring/nova.ts';
 import { recordedAnalyzer, type SwapAnalyzer } from '../../src/authoring/swap-analysis.ts';
 import { Service } from '../../src/service/commands.ts';
+import { SqliteKv } from '../../src/service/kv-sqlite.ts';
 import { loadContent } from '../../src/service/content.ts';
-import { handler } from '../../src/service/http.ts';
+import { handler, localKitchen } from '../../src/service/http.ts';
 import { novaInterpreter, recordedInterpreter } from '../../src/service/interpret.ts';
 import { Speaker } from '../../src/service/speech.ts';
 import { recordedDemo } from '../fixtures/demo-cards.ts';
 import { RECORDED_INTENTS } from '../fixtures/recorded-intents.ts';
+import { reviewReadings } from '../fixtures/review-questions.ts';
 
 const env = (k: string) => { const v = process.env[k]; if (!v) { console.error(`test server: ${k} is required`); process.exit(1); } return v; };
 const models = env('TEST_MODELS'), port = Number(env('CC_PORT')), dbPath = env('CC_DB'), adminToken = env('TEST_ADMIN_TOKEN');
@@ -36,7 +38,7 @@ const m2 = readJson('.artifacts/probes/m2-replay.json') ?? {};
 let extractor: Extractor, analyzer: SwapAnalyzer;
 if (models === 'fixtures') {
   const fx = await recordedDemo(content.vocab);
-  extractor = recordedExtractor({ ...m2, ...fx.readings }, 'REPLAY_OF_LIVE_M2_PROBE+RECORDED_FIXTURES');
+  extractor = recordedExtractor({ ...m2, ...fx.readings, ...reviewReadings() }, 'REPLAY_OF_LIVE_M2_PROBE+RECORDED_FIXTURES');
   analyzer = recordedAnalyzer(fx.cards, 'RECORDED_TEST_FIXTURES');
 } else if (models === 'probes') {
   if (!existsSync(join(root, '.artifacts/probes/cards2-replay.json'))) { console.error('EVIDENCE-DEPENDENT: TEST_MODELS=probes needs the retained live card probes in .artifacts/probes/ (see SETUP.md)'); process.exit(1); }
@@ -66,15 +68,19 @@ if (live) {
 
 const ex = process.env.TEST_EXAMPLES ?? 'all';
 const fixtureRecipes = ex === 'all' ? true : new Set(ex.split(',').map((n) => content.names.get(n.trim())).filter((x): x is string => !!x));
-const svc = new Service({ dbPath, content, interpreter, fixtureRecipes });
-const authoring = new Authoring({ store: svc.store, content, extractor, analyzer });
-svc.catalog = () => authoring.catalog();
-const product = handler(svc, { port, ownerToken: process.env.CC_OWNER_TOKEN ?? null, authoring, speaker, webRoot: join(root, 'dist/web'), archiveDir: join(dirname(dbPath), 'archive') });
+const kv = new SqliteKv(dbPath), local = localKitchen(kv);
+const workspace = (ws: string) => {
+  const svc = new Service({ kv, ws, content, interpreter, fixtureRecipes });
+  const authoring = new Authoring({ kv, ws, content, extractor, analyzer });
+  svc.catalog = (t) => authoring.catalogIn(t);
+  return { svc, authoring };
+};
+const product = handler(workspace('kitchen').svc, { port, ownerToken: process.env.CC_OWNER_TOKEN ?? null, workspace, local, speaker, webRoot: join(root, 'dist/web') });
 createServer((req, res) => {
   if (req.url !== '/admin/reset' || req.method !== 'POST') return void product(req, res);
   if (req.headers.authorization !== `Bearer ${adminToken}`) return void res.writeHead(401).end();
-  let b = ''; req.on('data', (c) => { b += c; }).on('end', () => {
-    const r = svc.adminReset((JSON.parse(b || '{}') as { fixtureId?: string }).fixtureId ?? '');
+  let b = ''; req.on('data', (c) => { b += c; }).on('end', async () => {
+    const r = await workspace(await local.current()).svc.adminReset((JSON.parse(b || '{}') as { fixtureId?: string }).fixtureId ?? '');
     res.writeHead(r.ok ? 200 : 400, { 'content-type': 'application/json' }).end(JSON.stringify(r));
   });
 }).listen(port, '127.0.0.1', () => console.log(`TEST server on http://127.0.0.1:${port}/ · models ${extractor.name} / ${analyzer.name} · interpreter ${interpreter.mode} · speech ${speaker ? 'polly' : 'off'}`));

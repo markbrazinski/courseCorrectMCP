@@ -1,14 +1,21 @@
 // Open vocabulary lookups. Vocabulary is content (content/approved/vocabulary.json), never code.
-import type { Id, Ingredient, Vocabulary } from '../contract/types.ts';
+import type { Id, Ingredient, Provenance, Vocabulary } from '../contract/types.ts';
 
 export const kindOf = (v: Vocabulary, kindId: Id) => v.kinds.find((k) => k.kindId === kindId);
 export const classesOfKind = (v: Vocabulary, kindId: Id): Id[] => kindOf(v, kindId)?.classes ?? [];
 export const classLabel = (v: Vocabulary, classId: Id) => v.classes.find((c) => c.classId === classId)?.label ?? classId;
 export const functionLabel = (v: Vocabulary, functionId: Id) => v.functions.find((f) => f.functionId === functionId)?.label ?? functionId;
 
-/** Class membership of an ingredient: PASS / FAIL, or UNKNOWN when its kind is missing or not REVIEWED. */
+/**
+ * A settled fact about what an ingredient IS or what a step (or a use in it) DOES: approved content says so (REVIEWED), or the
+ * cook confirmed it for this recipe (CONFIRMED by COOK, 2026-10-13). A reading's proposal never is. Functions and amounts have
+ * their own rules (the role table; the source).
+ */
+export const settled = (p: Provenance) => p.status === 'REVIEWED' || (p.status === 'CONFIRMED' && p.by === 'COOK');
+
+/** Class membership of an ingredient: PASS / FAIL, or UNKNOWN when its kind is missing or not settled. */
 export function ingredientInClass(v: Vocabulary, ing: Ingredient, classId: Id): 'PASS' | 'FAIL' | 'UNKNOWN' {
-  if (!ing.kind || ing.kind.prov.status !== 'REVIEWED') return 'UNKNOWN';
+  if (!ing.kind || !settled(ing.kind.prov)) return 'UNKNOWN';
   return classesOfKind(v, ing.kind.kindId).includes(classId) ? 'PASS' : 'FAIL';
 }
 

@@ -14,6 +14,7 @@ import { recordedAnalyzer } from './authoring/swap-analysis.ts';
 import { DEMO, demoPdf, recordedDemo } from '../tests/fixtures/demo-cards.ts';
 import { coverageSummary } from './contract/project.ts';
 import { Service } from './service/commands.ts';
+import { SqliteKv } from './service/kv-sqlite.ts';
 import { loadContent } from './service/content.ts';
 import { startHttp } from './service/http.ts';
 import { noneInterpreter } from './service/interpret.ts';
@@ -31,9 +32,9 @@ const token = randomUUID();
 const content = loadContent();
 const replay = JSON.parse(readFileSync(join(root, '.artifacts/probes/m2-replay.json'), 'utf8')) as Record<string, unknown>;
 const rec = await recordedDemo(content.vocab);
-const svc = new Service({ dbPath: join(outDir, `m2-${stamp}.db`), content, interpreter: noneInterpreter, fixtureRecipes: false });
-const authoring = new Authoring({ store: svc.store, content, extractor: recordedExtractor({ ...replay, ...rec.readings }, 'REPLAY_OF_LIVE_M2_PROBE+RECORDED_FIXTURES'), analyzer: recordedAnalyzer(rec.cards, 'RECORDED_FIXTURES') });
-svc.catalog = () => authoring.catalog();
+const svc = new Service({ kv: new SqliteKv(join(outDir, `m2-${stamp}.kv`)), content, interpreter: noneInterpreter, fixtureRecipes: false });
+const authoring = new Authoring({ kv: svc.kv, ws: svc.ws, content, extractor: recordedExtractor({ ...replay, ...rec.readings }, 'REPLAY_OF_LIVE_M2_PROBE+RECORDED_FIXTURES'), analyzer: recordedAnalyzer(rec.cards, 'RECORDED_FIXTURES') });
+svc.catalog = (t) => authoring.catalogIn(t);
 const port = 19000 + Math.floor(Math.random() * 900);
 const base = `http://127.0.0.1:${port}`;
 const server = await startHttp(svc, { port, ownerToken: token, authoring });
@@ -159,6 +160,6 @@ try {
   server.close();
   writeFileSync(join(outDir, `m2-${stamp}.json`), JSON.stringify({ kind: 'cc-m2-walkthrough/2', at: stamp, extractor: 'REPLAY_OF_LIVE_M2_PROBE+RECORDED_FIXTURES', analyzer: 'RECORDED_FIXTURES', interpreter: 'structured/tapped', mode: 'ENGINEERING', failures, calls: log }, null, 2));
   console.log(`\n${failures.length ? `FAILED (${failures.length}):\n  ${failures.join('\n  ')}` : 'ALL CHECKS PASSED'} · artifact .artifacts/walkthrough/m2-${stamp}.json`);
-  svc.close();
+  (svc.kv as SqliteKv).close();
   process.exitCode = failures.length ? 1 : 0;
 }

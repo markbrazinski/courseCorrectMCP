@@ -1,0 +1,105 @@
+{
+  "_status": "PROPOSED knowledge packet 2026-10-13 item C (role rows and cues). Not approved.",
+  "approval": "COMMISSIONED_PENDING_OWNER_CONFIRMATION",
+  "roles": [
+    {
+      "kindId": "plain-flour",
+      "techniqueId": "THICKEN_SLURRY",
+      "functions": [
+        "THICKENING"
+      ],
+      "note": "Flour stirred into cold liquid and cooked into a hot one thickens it."
+    },
+    {
+      "kindId": "cornstarch",
+      "techniqueId": "THICKEN_SLURRY",
+      "functions": [
+        "THICKENING"
+      ],
+      "note": "A cornstarch slurry thickens the hot liquid it's stirred into."
+    },
+    {
+      "kindId": "plain-flour",
+      "techniqueId": "MAKE_ROUX",
+      "functions": [
+        "THICKENING"
+      ],
+      "note": "Flour cooked in fat is the roux that thickens the sauce."
+    },
+    {
+      "kindId": "chicken-stock",
+      "techniqueId": "SIMMER",
+      "functions": [
+        "LIQUID",
+        "FLAVOR"
+      ],
+      "note": "Stock simmered in a dish is its cooking liquid and much of its savoury flavour."
+    },
+    {
+      "kindId": "chicken-broth",
+      "techniqueId": "SIMMER",
+      "functions": [
+        "LIQUID",
+        "FLAVOR"
+      ],
+      "note": "Broth simmered in a dish is its cooking liquid and much of its savoury flavour."
+    },
+    {
+      "kindId": "heavy-cream",
+      "techniqueId": "SIMMER",
+      "functions": [
+        "LIQUID",
+        "FAT"
+      ],
+      "note": "Cream simmered in a sauce is its liquid and its fat."
+    },
+    {
+      "kindId": "sour-milk",
+      "techniqueId": "MIX_DOUGH",
+      "functions": [
+        "LIQUID",
+        "ACIDITY"
+      ],
+      "note": "Sour milk in a batter or dough is its liquid and the acid that baking soda reacts with."
+    },
+    {
+      "kindId": "buttermilk",
+      "techniqueId": "MIX_DOUGH",
+      "functions": [
+        "LIQUID",
+        "ACIDITY"
+      ],
+      "note": "Buttermilk in a batter or dough is its liquid and the acid that baking soda reacts with."
+    },
+    {
+      "kindId": "egg-yolk",
+      "techniqueId": "EMULSIFY",
+      "functions": [
+        "EMULSIFYING"
+      ],
+      "note": "Egg yolk is what holds the oil or butter in suspension."
+    }
+  ],
+  "cues": {
+    "SIMMER": [
+      "\\bsimmer\\w*\\b"
+    ],
+    "THICKEN_SLURRY": [
+      "\\bslurry\\b",
+      "\\bthicken\\w*\\b[^.;]*\\b(?:diluted|mixed|blended|stirred)\\b[^.;]*\\b(?:cold|cool)\\b",
+      "\\b(?:mix|stir|whisk|blend)\\w*\\b[^.;]*\\b(?:cornstarch|corn starch|flour)\\b[^.;]*\\b(?:cold|cool)\\b[^.;]*\\b(?:water|milk|stock|broth|liquid)\\b"
+    ],
+    "MAKE_ROUX": [
+      "\\broux\\b",
+      "\\b(?:stir|whisk|sprinkle)\\w*\\b[^.;]*\\bflour\\b[^.;]*\\b(?:into|over) the (?:melted )?(?:butter|fat|drippings|oil)\\b"
+    ],
+    "EMULSIFY": [
+      "\\bdrop by drop\\b",
+      "\\bemulsif\\w*\\b",
+      "\\badd\\w* (?:the )?oil (?:gradually|slowly|in a (?:thin|slow) stream)\\b"
+    ],
+    "MIX_DOUGH": [
+      "\\bbatter\\b"
+    ]
+  }
+}

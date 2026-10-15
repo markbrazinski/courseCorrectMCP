@@ -1,0 +1,145 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "RECOVERY",
+  "patternId": "cornstarch_for_flour_slurry",
+  "version": 1,
+  "title": "Cornstarch for flour thickening a liquid as a slurry",
+  "target": {
+    "ingredientClass": "flour",
+    "performsAll": [
+      "THICKENING"
+    ],
+    "stepTechnique": "THICKEN_SLURRY"
+  },
+  "slots": [],
+  "applicability": [],
+  "exceptions": [
+    {
+      "exceptionId": "long_cook_or_frozen_after_thickening",
+      "when": {
+        "kind": "STEP_TEXT_MATCHES",
+        "slot": "$target.step",
+        "cues": [
+          "\\b(?:cook|simmer|boil)\\w*\\b[^.;]*\\b(?:ten|fifteen|twenty|thirty|forty|fifty|sixty|[1-9]\\d)\\s*minutes\\b",
+          "\\b(?:cook|simmer|boil)\\w*\\b[^.;]*\\b(?:an?|one|two|\\d+)\\s*hours?\\b",
+          "\\bfreez\\w*"
+        ],
+        "andLater": true
+      },
+      "reason": "The dish keeps cooking for a long time after it thickens (or it's frozen), and a cornstarch-thickened liquid thins again with long cooking and freezing."
+    }
+  ],
+  "evidence": {
+    "quantityStatus": "SOURCED",
+    "approval": "COMMISSIONED_PENDING_OWNER_CONFIRMATION",
+    "basis": "Knowledge packet 2026-10-13 item E1, PROPOSED (not approved). Research private/research/substitution-knowledge, cornstarch_for_flour_as_thickener (SOURCE_SUPPORTED): Argo SRC-FS-38#a (twice the thickening power: use half), Illinois Extension SRC-FS-34#a (2 tbsp flour or 1 tbsp cornstarch per cup of liquid), SRC-FS-32#a (2:1). Slurry only: a roux or fat-based sauce is a different technique (Illinois: flour works best there). Excluded by the step's own text: cooking 10 minutes or more after thickening, or freezing (Argo: avoid prolonged boiling; Argo, PSU: freezing). The 10-minute line and the 1/2 tbsp-1/2 cup input bounds are engineering choices."
+  },
+  "introduces": [
+    {
+      "local": "starch",
+      "kindId": "cornstarch",
+      "name": "Cornstarch"
+    }
+  ],
+  "quantities": {
+    "starch": {
+      "kind": "SCALE",
+      "from": {
+        "listedTotalOf": "$target"
+      },
+      "sourceUnit": "ML",
+      "factor": {
+        "n": 1,
+        "d": 2
+      },
+      "resultUnit": "ML",
+      "inputDomain": [
+        {
+          "n": 15,
+          "d": 2
+        },
+        {
+          "n": 120,
+          "d": 1
+        }
+      ],
+      "increment": {
+        "n": 1,
+        "d": 100
+      },
+      "maxAbsError": {
+        "n": 1,
+        "d": 200
+      },
+      "outputDomain": [
+        {
+          "n": 15,
+          "d": 4
+        },
+        {
+          "n": 60,
+          "d": 1
+        }
+      ],
+      "display": "SPOONS"
+    }
+  },
+  "ops": [
+    {
+      "op": "REPLACE_USE",
+      "use": "$target",
+      "with": {
+        "local": "starch_use",
+        "ingredient": {
+          "introduce": "starch"
+        },
+        "at": "$target.step",
+        "qty": "starch",
+        "prepNote": null,
+        "functions": [
+          "THICKENING"
+        ],
+        "allowance": null
+      }
+    },
+    {
+      "op": "APPEND_STEP_NOTE",
+      "step": "$target.step",
+      "text": "Stir the cornstarch into the cold liquid until smooth, then bring it to a full boil, stirring, and boil it for a minute; don't keep boiling it hard once it has thickened."
+    },
+    {
+      "op": "SET_RESUME",
+      "step": "$target.step"
+    }
+  ],
+  "siblingHandlers": [],
+  "functionAccounting": [
+    {
+      "from": "$target",
+      "functionId": "THICKENING",
+      "disposition": "RETAINED",
+      "to": "starch_use"
+    }
+  ],
+  "introducedFunctions": [],
+  "consequence": {
+    "outcomeClass": "SUBSTITUTED",
+    "equivalence": "NOT_EQUIVALENT",
+    "headline": "Thicken it with half as much cornstarch instead of the flour.",
+    "reason": "Cornstarch thickens about twice as much as flour, so half the amount by volume does the same job (Illinois Extension; Argo).",
+    "tradeoff": "It turns glossy and see-through rather than opaque, and it thins again if it's boiled hard or long once thickened. Not kitchen-tested in this recipe."
+  },
+  "proposal": {
+    "classes": [
+      "starch-thickener"
+    ],
+    "relation": "REALIZED_AS_PROPOSED",
+    "text": "Yes, with half as much cornstarch."
+  },
+  "guards": [
+    {
+      "kind": "CURRENT_STEP_IS",
+      "step": "$target.step"
+    }
+  ]
+}

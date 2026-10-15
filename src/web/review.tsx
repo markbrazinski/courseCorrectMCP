@@ -98,7 +98,7 @@ export function Review({ content: c, sourceLines, sourceName, sourceRefs, wide, 
       </div>
       {c.ingredients.map((g) => <div key={g.id} style={{ display: 'grid', gridTemplateColumns: cols, borderBottom: '1px solid var(--cc-border)' }}>
         <span style={{ padding: '7px 14px', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 1, lineHeight: 1.25 }}>
-          <span style={{ fontSize: wide && !small ? 16 : 14, fontWeight: 600 }}>{g.name}</span><span style={{ fontSize: 14, color: 'var(--cc-text-2)' }}>{g.totalAmount.display ?? ''}</span>
+          <span style={{ fontSize: wide && !small ? 16 : 14, fontWeight: 600 }}>{g.name}{g.group && <span style={{ fontWeight: 400, color: 'var(--cc-text-2)' }}> · {g.group.replace(/:\s*$/, '')}</span>}</span><span style={{ fontSize: 14, color: 'var(--cc-text-2)' }}>{g.totalAmount.display ?? ''}</span>
         </span>
         {steps.map((s) => {
           const u = g.uses.find((x) => x.stepId === s.id);
@@ -278,7 +278,7 @@ function UseDetail({ c, g, u, plan, plans, alt, setAlt, provOpen, setProvOpen, a
       <span className="dots"><i /><i /><i /></span><strong data-testid="swap" style={{ fontSize: 20 }}>Checking this use for alternatives…</strong></div>}
     {st === 'failed' && <div role="alert" data-testid="answer-card" className="attention" style={{ display: 'flex', flexDirection: 'column', gap: 10, borderRadius: 14, padding: '18px 20px' }}>
       <strong style={{ fontSize: 21 }}>! Check failed</strong><span data-testid="swap" style={{ fontSize: 17, lineHeight: 1.4 }}>{reason?.text}</span>
-      <span className="muted" style={{ fontSize: 15 }}>CourseCorrect doesn’t guess an alternative instead. Checking again needs a new analysis of the recipe, which this version can’t start.</span>{details}</div>}
+      <span className="muted" style={{ fontSize: 15 }}>CourseCorrect doesn’t guess an alternative instead. When the check didn’t finish, “Check them again” at the top runs it again for these uses.</span>{details}</div>}
     {st === 'unexamined' && <div data-testid="answer-card" style={{ background: 'var(--cc-surface)', borderRadius: 14, padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 10, border: '1.5px dashed var(--cc-border-strong)' }}>
       <strong style={{ fontSize: 21 }}>Not checked yet</strong><span data-testid="swap" style={{ fontSize: 17, lineHeight: 1.4 }}>{reason?.text ?? 'This use hasn’t been checked for alternatives.'}</span>{details}</div>}
 

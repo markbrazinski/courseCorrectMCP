@@ -18,6 +18,8 @@ import type { Extractor } from '../authoring/extract.ts';
 import { hash, sha256 } from '../domain/rational.ts';
 import { stepOrder } from '../domain/recipe.ts';
 import { Service } from '../service/commands.ts';
+import { SqliteKv } from '../service/kv-sqlite.ts';
+import { modelRows } from './records.ts';
 import { loadContent } from '../service/content.ts';
 import { noneInterpreter } from '../service/interpret.ts';
 import { DEMO, demoPdf, recordedDemo } from '../../tests/fixtures/demo-cards.ts';
@@ -66,9 +68,9 @@ async function freeze() {
 
 /** Import every frozen PDF once and judge it. `live` → record the replay. */
 async function importAll(dbPath: string, extractor: Extractor, analyzer: SwapAnalyzer) {
-  const svc = new Service({ dbPath, content, interpreter: noneInterpreter, fixtureRecipes: false });
-  const auth = new Authoring({ store: svc.store, content, extractor, analyzer });
-  svc.catalog = () => auth.catalog();
+  const svc = new Service({ kv: new SqliteKv(dbPath), content, interpreter: noneInterpreter, fixtureRecipes: false });
+  const auth = new Authoring({ kv: svc.kv, ws: svc.ws, content, extractor, analyzer });
+  svc.catalog = (t) => auth.catalogIn(t);
   const out: Record<string, { draftId: string; recipeId: string | null; job: unknown; save: unknown }> = {};
   for (const name of NAMES) {
     const bytes = new Uint8Array(readFileSync(join(dir, `${name}.pdf`)));
@@ -77,7 +79,7 @@ async function importAll(dbPath: string, extractor: Extractor, analyzer: SwapAna
     const job = await auth.waitForJob(r.job.id);
     let save: unknown = null, recipeId: string | null = null;
     if (job.state !== 'failed') {
-      const s = auth.save(r.draftId, { expectedRevision: auth.revision(r.draftId), idempotencyKey: `cards-probe-${name}` });
+      const s = await auth.save(r.draftId, { expectedRevision: await auth.revision(r.draftId), idempotencyKey: `cards-probe-${name}` });
       save = s; recipeId = s.recipeId;
     }
     out[name] = { draftId: r.draftId, recipeId, job, save };
@@ -85,34 +87,34 @@ async function importAll(dbPath: string, extractor: Extractor, analyzer: SwapAna
   return { svc, auth, out };
 }
 
-function judge(svc: Service, auth: Authoring, out: Awaited<ReturnType<typeof importAll>>['out']) {
+async function judge(svc: Service, auth: Authoring, out: Awaited<ReturnType<typeof importAll>>['out']) {
   const expected: Record<string, [number, number]> = { risotto: [8, 8], scones: [5, 7], shortcake: [7, 7] };
   const results: Record<string, { pass: boolean; detail: string }> = {};
   const table: { recipe: string; step: number; ingredient: string; verdict: string | null; status: string; reason: string | null; role: string | null; opinion: string | null; swap: string }[] = [];
-  const cardOf = (name: string, ing: RegExp, step: number) => {
+  const cardOf = async (name: string, ing: RegExp, step: number) => {
     const d = out[name]; if (!d?.draftId) return null;
-    const { pack } = auth.coverageOf(d.draftId);
+    const { pack } = await auth.coverageOf(d.draftId);
     const r = pack?.recipe; if (!r) return null;
     const u = r.uses.find((x) => ing.test(r.ingredients.find((i) => i.ingredientId === x.ingredientId)!.name) && stepOrder(r, x.stepId) === step);
     if (!u) return null;
-    const a = svc.store.get<{ raw_json: string | null; refs_json: string }>('SELECT raw_json, refs_json FROM swap_analyses WHERE draft_id = ? ORDER BY rowid DESC LIMIT 1', d.draftId);
+    const a = (await modelRows(svc.kv, svc.ws, d.draftId)).analyses[0];
     const refs = a ? JSON.parse(a.refs_json) as { uses: Record<string, string> } : { uses: {} };
     const ref = Object.entries(refs.uses).find(([, id]) => id === u.useId)?.[0];
     const raw = a?.raw_json ? (JSON.parse(a.raw_json) as { cards?: { useRef?: string }[] }).cards?.find((c) => c?.useRef === ref) as Record<string, any> | undefined : undefined;   // eslint-disable-line @typescript-eslint/no-explicit-any
     return { entry: pack!.cards!.find((e) => e.useId === u.useId)!, raw, use: u, recipe: r };
   };
-  const x1 = NAMES.map((n) => {
+  const x1 = await Promise.all(NAMES.map(async (n) => {
     const d = out[n]; const job = d.job as { state?: string };
-    const r = d.draftId ? auth.effective(d.draftId) : null;
+    const r = d.draftId ? await auth.effective(d.draftId) : null;
     const ok = job?.state === 'succeeded' && !!r && r.ingredients.length === expected[n][0] && r.steps.length === expected[n][1];
     return { ok, s: `${n}: ${job?.state ?? 'no job'} ${r ? `${r.ingredients.length}/${r.steps.length}` : ''}` };
-  });
+  }));
   results.X1 = { pass: x1.every((x) => x.ok), detail: x1.map((x) => x.s).join('; ') };
   const bad: string[] = [];
   for (const n of NAMES) {
     const d = out[n]; if (!d.draftId) { bad.push(`${n}: no draft`); continue; }
-    const { pack } = auth.coverageOf(d.draftId);
-    const c = auth.getDraft(d.draftId).draft.content;
+    const { pack } = await auth.coverageOf(d.draftId);
+    const c = (await auth.getDraft(d.draftId)).draft.content;
     for (const e of pack?.cards ?? []) {
       const u = pack!.recipe.uses.find((x) => x.useId === e.useId)!;
       const ing = pack!.recipe.ingredients.find((i) => i.ingredientId === u.ingredientId)!;
@@ -122,14 +124,14 @@ function judge(svc: Service, auth: Authoring, out: Awaited<ReturnType<typeof imp
     }
   }
   results.X2 = { pass: !bad.length && table.length > 0, detail: bad.join('; ') || `${table.length} uses, all valid` };
-  const sc = cardOf('scones', /cream/i, 3);
+  const sc = await cardOf('scones', /cream/i, 3);
   const swapNames = sc?.raw?.swap ? [sc.raw.swap, ...(sc.raw.swap.otherIngredients ?? [])].map((x: { ingredient: string; kindId: string | null }) => `${x.kindId ?? ''} ${x.ingredient}`).join(' | ') : '';
   const brush = sc?.raw?.siblings?.[0]?.handling ?? null;
   results.X3 = { pass: !!sc && sc.entry.status !== 'INVALID' && sc.entry.verdict === 'swap' && /milk/i.test(swapNames) && /butter/i.test(swapNames) && !!brush,
     detail: sc ? `${sc.entry.status} ${sc.entry.verdict}; swap: ${swapNames}; brushing: ${brush}; ${sc.entry.reason ?? ''}` : 'use not found' };
-  const kw = cardOf('shortcake', /cream/i, 6);
+  const kw = await cardOf('shortcake', /cream/i, 6);
   results.X4 = { pass: !!kw && kw.entry.status !== 'INVALID' && kw.entry.verdict === 'no' && /whip|air|peak/i.test(kw.entry.opinion ?? ''), detail: kw ? `${kw.entry.status} ${kw.entry.verdict}: ${kw.entry.opinion ?? ''} ${kw.entry.reason ?? ''}` : 'use not found' };
-  const rw = cardOf('risotto', /wine/i, 5);
+  const rw = await cardOf('risotto', /wine/i, 5);
   results.X6 = { pass: !!rw && rw.entry.status !== 'INVALID' && rw.entry.verdict === 'swap', detail: rw ? `${rw.entry.status} ${rw.entry.verdict}: ${rw.entry.opinion ?? ''} ${rw.entry.reason ?? ''}` : 'use not found' };
   return { results, table };
 }
@@ -137,11 +139,11 @@ function judge(svc: Service, auth: Authoring, out: Awaited<ReturnType<typeof imp
 /** X5 needs cooking: steps 1–3 done, "milk and butter" for the cream (structured input; no interpreter, no explainer). */
 async function cookShortcake(svc: Service, recipeId: string | null) {
   if (!recipeId) return { pass: false, detail: 'not saved' };
-  const st = svc.startRecipe({ commandId: `probe-${Date.now()}`, recipeId });
+  const st = await svc.startRecipe({ commandId: `probe-${Date.now()}`, recipeId });
   if (st.outcome !== 'started') return { pass: false, detail: JSON.stringify(st).slice(0, 200) };
   let run = st.run;
   for (const s of st.recipe.steps.slice(0, 3)) {
-    const r = svc.recordProgress({ commandId: `probe-p-${s.id}`, runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: s.id, progress: 'done' });
+    const r = await svc.recordProgress({ commandId: `probe-p-${s.id}`, runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: s.id, progress: 'done' });
     if (r.outcome !== 'recorded') return { pass: false, detail: JSON.stringify(r).slice(0, 200) };
     run = r.run;
   }
@@ -176,16 +178,16 @@ async function run() {
   const replay = { readings: {} as Record<string, unknown>, cards: {} as Record<string, unknown> };
   const raw: Record<string, unknown> = {};
   for (const n of NAMES) {
-    const ex = svc.store.all<{ status: string; raw_json: string | null; issues_json: string; input_tokens: number | null; output_tokens: number | null; cost_usd: number }>('SELECT status, raw_json, issues_json, input_tokens, output_tokens, cost_usd FROM extractions WHERE draft_id = ?', out[n].draftId);
-    const sa = svc.store.all<{ status: string; raw_json: string | null; issues_json: string; input_tokens: number | null; output_tokens: number | null; cost_usd: number; input_hash: string }>('SELECT status, raw_json, issues_json, input_tokens, output_tokens, cost_usd, input_hash FROM swap_analyses WHERE draft_id = ?', out[n].draftId);
+    const ex = (await modelRows(svc.kv, svc.ws, out[n].draftId)).extractions;
+    const sa = (await modelRows(svc.kv, svc.ws, out[n].draftId)).analyses;
     raw[n] = { job: out[n].job, save: out[n].save, extraction: ex.map((x) => ({ ...x, raw: x.raw_json ? JSON.parse(x.raw_json) : null, issues: JSON.parse(x.issues_json), raw_json: undefined, issues_json: undefined })),
       swapAnalysis: sa.map((x) => ({ ...x, raw: x.raw_json ? JSON.parse(x.raw_json) : null, issues: x.issues_json ? JSON.parse(x.issues_json) : null, raw_json: undefined, issues_json: undefined })) };
     const pdf = await readPdf(new Uint8Array(readFileSync(join(dir, `${n}.pdf`))));
     if (pdf.ok && ex[0]?.raw_json) replay.readings[hash(userMessage(pdf.source.pages.filter((p) => p.status === 'TEXT')))] = JSON.parse(ex[0].raw_json);
     if (sa[0]?.raw_json) replay.cards[sa[0].input_hash] = JSON.parse(sa[0].raw_json);
   }
-  let judged: ReturnType<typeof judge>;
-  try { judged = judge(svc, a, out); judged.results.X5 = await cookShortcake(svc, out.shortcake.recipeId); }
+  let judged: Awaited<ReturnType<typeof judge>>;
+  try { judged = await judge(svc, a, out); judged.results.X5 = await cookShortcake(svc, out.shortcake.recipeId); }
   catch (e) { judged = { results: { ERROR: { pass: false, detail: (e as Error).message } }, table: [] }; }   // still keep every raw result
   const after = ledger.totals();
   const spend = ledger.entries().filter((e) => e.authorization === auth.id);
@@ -197,19 +199,19 @@ async function run() {
   writeFileSync(replayPath, JSON.stringify(replay, null, 2));
   for (const [k, x] of Object.entries(results.expectations)) console.log(`${k} ${x.pass ? 'PASS' : 'FAIL'} ${x.detail}`);
   console.log(`authorization ${auth.id}: $${after.authorizationUsd.toFixed(6)} · calls ${JSON.stringify(after.calls)}`);
-  svc.close();
+  (svc.kv as SqliteKv).close();
 }
 
 /** run()'s import and judging without calls: RECORDED fixtures (rehearsal) or the kept live output (re-validation). */
 async function rehearse(live: boolean) {
   const rec = live ? JSON.parse(readFileSync(replayPath, 'utf8')) as { readings: Record<string, unknown>; cards: Record<string, unknown> } : await recordedDemo(v);
   const { svc, auth, out } = await importAll(join(root, `.artifacts/probes/cards-${live ? 'revalidation' : 'rehearsal'}-${Date.now()}.db`), recordedExtractor(rec.readings), recordedAnalyzer(rec.cards));
-  const judged = judge(svc, auth, out);
+  const judged = await judge(svc, auth, out);
   judged.results.X5 = await cookShortcake(svc, out.shortcake.recipeId);
   const note = live ? 'RE-VALIDATION of the kept live output (results-v1.json) by the code as of this file: no new calls; not the as-run result' : 'RECORDED test fixtures, not Nova';
   writeFileSync(live ? join(dir, 'revalidated-v1.json') : join(root, '.artifacts/probes/cards-rehearsal.json'), JSON.stringify({ note, at: new Date().toISOString(), ...judged }, null, 2));
   for (const [k, x] of Object.entries(judged.results).sort()) console.log(`${k} ${x.pass ? 'PASS' : 'FAIL'} ${x.detail}`);
-  svc.close();
+  (svc.kv as SqliteKv).close();
 }
 
 const mode = process.argv[2];

@@ -25,10 +25,14 @@ function mcp(): Promise<Client> {
   })().catch((e) => { client = null; throw e; });
   return client;
 }
+/** The deployed service's session ended (401): reload, which shows the sign-in page. Nothing was changed. */
+const signedOut = (status: number | undefined) => { if (status === 401) location.reload(); };
 /** One MCP tool call. Throws only when no response arrived (the caller decides what "unknown" means). */
 export async function call<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
-  const r = await (await mcp()).callTool({ name, arguments: args });
-  return r.structuredContent as T;
+  try {
+    const r = await (await mcp()).callTool({ name, arguments: args });
+    return r.structuredContent as T;
+  } catch (e) { signedOut((e as { code?: number }).code); throw e; }
 }
 
 // ---------- web requests (logged as 'web') ----------
@@ -45,6 +49,7 @@ export async function web<T>(method: string, path: string, body?: unknown, heade
     method, headers: { ...(isFile ? { 'content-type': 'application/pdf' } : body !== undefined ? { 'content-type': 'application/json' } : {}), ...headers },
     body: isFile ? body : body !== undefined ? JSON.stringify(body) : undefined,
   });
+  signedOut(r.status);
   const data = (r.headers.get('content-type') ?? '').includes('json') ? await r.json() as T : (undefined as T);
   if (label) logWeb(label, `${method} ${path.split('?')[0]}`, `${r.status}${(data as { error?: { code?: string } })?.error?.code ? ` · ${(data as { error: { code: string } }).error.code}` : ''}`);
   return { status: r.status, data };
@@ -65,6 +70,7 @@ export async function startActivityScope() {
 export interface ActivityEntry { id: string; seq: number; name: string; correlationId: string | null; status: string; summary: string; input: unknown; trace?: { interpretation: string | null; deterministic: string | null }; durationMs: number; at: string }
 export async function activitySince(after: number): Promise<ActivityEntry[]> {
   const r = await fetch(`/activity?after=${after}`);
+  signedOut(r.status);
   return r.ok ? ((await r.json()) as { entries: ActivityEntry[] }).entries : [];
 }
 
@@ -72,6 +78,7 @@ export async function activitySince(after: number): Promise<ActivityEntry[]> {
 export type SpeechRef = { evaluationId: string } | { runId: string; stepId: string; amendmentId?: string; next?: true };
 export async function speechAudio(ref: SpeechRef): Promise<{ ok: true; url: string } | { ok: false; message: string }> {
   const r = await fetch('/speech', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(ref) });
+  signedOut(r.status);
   if (!r.ok) return { ok: false, message: ((await r.json().catch(() => null)) as { error?: { message?: string } } | null)?.error?.message ?? `Speech failed (${r.status})` };
   return { ok: true, url: URL.createObjectURL(await r.blob()) };
 }
@@ -91,3 +98,10 @@ export const prefs = {
   get(k: string) { try { return localStorage.getItem(`cc.${k}`); } catch { return null; } },
   set(k: string, v: string) { try { localStorage.setItem(`cc.${k}`, v); } catch { /* per-viewer convenience only */ } },
 };
+
+/** Deployed service: this browser's kitchen moves to a new, empty workspace (the old one is kept on the server). */
+export async function startOver(): Promise<boolean> {
+  const r = await fetch('/workspace/reset', { method: 'POST' });
+  signedOut(r.status);
+  return r.ok;
+}

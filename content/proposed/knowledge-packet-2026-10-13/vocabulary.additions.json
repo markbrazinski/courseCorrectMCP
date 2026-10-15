@@ -1,0 +1,343 @@
+{
+  "_status": "PROPOSED knowledge packet 2026-10-13 item A (identity) and B (techniques, functions). Not approved; never loaded by the product. See README.md.",
+  "version": 4,
+  "approval": "COMMISSIONED_PENDING_OWNER_CONFIRMATION",
+  "functions": [
+    {
+      "functionId": "THICKENING",
+      "label": "thickening"
+    },
+    {
+      "functionId": "EMULSIFYING",
+      "label": "emulsifying"
+    }
+  ],
+  "techniques": [
+    {
+      "techniqueId": "SIMMER",
+      "label": "simmer"
+    },
+    {
+      "techniqueId": "THICKEN_SLURRY",
+      "label": "thicken with a slurry"
+    },
+    {
+      "techniqueId": "MAKE_ROUX",
+      "label": "make a roux"
+    },
+    {
+      "techniqueId": "EMULSIFY",
+      "label": "emulsify"
+    }
+  ],
+  "classes": [
+    {
+      "classId": "black-pepper",
+      "label": "black pepper"
+    },
+    {
+      "classId": "chicken-stock-or-broth",
+      "label": "chicken stock or broth"
+    },
+    {
+      "classId": "bouillon-base",
+      "label": "bouillon base"
+    },
+    {
+      "classId": "starch-thickener",
+      "label": "starch thickener"
+    },
+    {
+      "classId": "acidic-dairy",
+      "label": "acidic dairy"
+    },
+    {
+      "classId": "egg",
+      "label": "egg"
+    },
+    {
+      "classId": "egg-yolk",
+      "label": "egg yolk"
+    },
+    {
+      "classId": "tomato",
+      "label": "tomato"
+    },
+    {
+      "classId": "ginger-root",
+      "label": "ginger root"
+    },
+    {
+      "classId": "spice",
+      "label": "spice"
+    },
+    {
+      "classId": "sweetener-syrup",
+      "label": "syrup sweetener"
+    },
+    {
+      "classId": "coconut-milk",
+      "label": "coconut milk"
+    },
+    {
+      "classId": "soy-sauce",
+      "label": "soy sauce"
+    }
+  ],
+  "kindClassAdditions": {
+    "chicken-stock": [
+      "chicken-stock-or-broth"
+    ]
+  },
+  "kinds": [
+    {
+      "kindId": "black-pepper",
+      "label": "black pepper",
+      "short": "pepper",
+      "aliases": [
+        "ground black pepper",
+        "freshly ground black pepper",
+        "freshly cracked black pepper",
+        "cracked black pepper"
+      ],
+      "classes": [
+        "black-pepper",
+        "spice"
+      ]
+    },
+    {
+      "kindId": "kosher-salt",
+      "label": "kosher salt",
+      "short": "salt",
+      "aliases": [],
+      "classes": [
+        "salt"
+      ]
+    },
+    {
+      "kindId": "diamond-crystal-kosher-salt",
+      "label": "Diamond Crystal kosher salt",
+      "short": "salt",
+      "aliases": [],
+      "classes": [
+        "salt"
+      ]
+    },
+    {
+      "kindId": "table-salt",
+      "label": "table salt",
+      "short": "salt",
+      "aliases": [],
+      "classes": [
+        "salt"
+      ]
+    },
+    {
+      "kindId": "chicken-broth",
+      "label": "chicken broth",
+      "short": "broth",
+      "aliases": [],
+      "classes": [
+        "cooking-stock",
+        "chicken-stock-or-broth"
+      ]
+    },
+    {
+      "kindId": "better-than-bouillon-chicken-base",
+      "label": "Better Than Bouillon chicken base",
+      "short": "base",
+      "aliases": [
+        "chicken better than bouillon",
+        "better than bouillon roasted chicken base"
+      ],
+      "classes": [
+        "bouillon-base"
+      ]
+    },
+    {
+      "kindId": "cornstarch",
+      "label": "cornstarch",
+      "short": "cornstarch",
+      "aliases": [
+        "corn starch"
+      ],
+      "classes": [
+        "starch-thickener"
+      ]
+    },
+    {
+      "kindId": "sour-milk",
+      "label": "sour milk",
+      "short": "sour milk",
+      "aliases": [],
+      "classes": [
+        "acidic-dairy"
+      ]
+    },
+    {
+      "kindId": "buttermilk",
+      "label": "buttermilk",
+      "short": "buttermilk",
+      "aliases": [
+        "cultured buttermilk"
+      ],
+      "classes": [
+        "acidic-dairy"
+      ]
+    },
+    {
+      "kindId": "egg",
+      "label": "egg",
+      "short": "egg",
+      "aliases": [
+        "eggs",
+        "large egg",
+        "large eggs"
+      ],
+      "classes": [
+        "egg"
+      ]
+    },
+    {
+      "kindId": "egg-yolk",
+      "label": "egg yolk",
+      "short": "yolk",
+      "aliases": [
+        "egg yolks"
+      ],
+      "classes": [
+        "egg-yolk"
+      ]
+    },
+    {
+      "kindId": "shallot",
+      "label": "shallot",
+      "short": "shallot",
+      "aliases": [
+        "shallots"
+      ],
+      "classes": [
+        "allium"
+      ]
+    },
+    {
+      "kindId": "canned-tomatoes",
+      "label": "canned tomatoes",
+      "short": "tomatoes",
+      "aliases": [
+        "canned whole tomatoes"
+      ],
+      "classes": [
+        "tomato"
+      ]
+    },
+    {
+      "kindId": "tomato-paste",
+      "label": "tomato paste",
+      "short": "tomato paste",
+      "aliases": [],
+      "classes": [
+        "tomato"
+      ]
+    },
+    {
+      "kindId": "ground-ginger",
+      "label": "ground ginger",
+      "short": "ginger",
+      "aliases": [],
+      "classes": [
+        "spice"
+      ]
+    },
+    {
+      "kindId": "ginger-root",
+      "label": "ginger root",
+      "short": "ginger",
+      "aliases": [
+        "fresh ginger root"
+      ],
+      "classes": [
+        "ginger-root"
+      ]
+    },
+    {
+      "kindId": "ground-cumin",
+      "label": "ground cumin",
+      "short": "cumin",
+      "aliases": [],
+      "classes": [
+        "spice"
+      ]
+    },
+    {
+      "kindId": "dried-oregano",
+      "label": "dried oregano",
+      "short": "oregano",
+      "aliases": [],
+      "classes": [
+        "spice"
+      ]
+    },
+    {
+      "kindId": "cayenne",
+      "label": "cayenne",
+      "short": "cayenne",
+      "aliases": [
+        "cayenne pepper",
+        "ground cayenne"
+      ],
+      "classes": [
+        "spice"
+      ]
+    },
+    {
+      "kindId": "molasses",
+      "label": "molasses",
+      "short": "molasses",
+      "aliases": [],
+      "classes": [
+        "sweetener-syrup"
+      ]
+    },
+    {
+      "kindId": "canola-oil",
+      "label": "canola oil",
+      "short": "oil",
+      "aliases": [],
+      "classes": [
+        "cooking-oil"
+      ]
+    },
+    {
+      "kindId": "extra-virgin-olive-oil",
+      "label": "extra-virgin olive oil",
+      "short": "olive oil",
+      "aliases": [
+        "extra virgin olive oil"
+      ],
+      "classes": [
+        "cooking-oil"
+      ]
+    },
+    {
+      "kindId": "coconut-milk",
+      "label": "coconut milk",
+      "short": "coconut milk",
+      "aliases": [
+        "canned coconut milk"
+      ],
+      "classes": [
+        "coconut-milk"
+      ]
+    },
+    {
+      "kindId": "soy-sauce",
+      "label": "soy sauce",
+      "short": "soy sauce",
+      "aliases": [],
+      "classes": [
+        "soy-sauce"
+      ]
+    }
+  ]
+}

@@ -8,6 +8,9 @@ import { expandRecipe, type RecipeSource } from '../src/domain/recipe.ts';
 import { evaluate } from '../src/engine/evaluate.ts';
 import { applyProgress } from '../src/engine/progress.ts';
 import { Service } from '../src/service/commands.ts';
+import type { Kv } from '../src/service/kv.ts';
+import { DynamoKv } from '../src/service/kv-dynamo.ts';
+import { SqliteKv } from '../src/service/kv-sqlite.ts';
 import { loadContent } from '../src/service/content.ts';
 import { recordedInterpreter, noneInterpreter } from '../src/service/interpret.ts';
 import { RECORDED_INTENTS } from './fixtures/recorded-intents.ts';
@@ -60,15 +63,23 @@ export function evaluateWithEnough(p: RecipePack, snap: RunSnapshot, missing: Id
   return { first, second: evaluate(p, v, snap, req(missing, proposed, answers)) };
 }
 
-let n = 0;
-export function newService(opts: { recorded?: boolean; dbPath?: string } = {}) {
-  const dbPath = opts.dbPath ?? join(mkdtempSync(join(tmpdir(), 'ccmcp-')), 'test.db');
+let n = 0, wsN = 0;
+/** The store under test: a fresh SQLite file, or (CC_TEST_DYNAMO_ENDPOINT set, e.g. DynamoDB Local) one shared table where
+ *  every test gets its own workspace partition, the isolation the deployed service relies on. */
+export function newKv(dbPath?: string): Kv {
+  const endpoint = process.env.CC_TEST_DYNAMO_ENDPOINT;
+  return endpoint ? new DynamoKv(process.env.CC_TEST_DYNAMO_TABLE ?? 'cc-test', { endpoint, region: 'us-east-1' }) : new SqliteKv(dbPath ?? join(mkdtempSync(join(tmpdir(), 'ccmcp-')), 'test.kv'));
+}
+export const newWs = () => `t${process.pid}_${Date.now().toString(36)}_${++wsN}`;
+export function newService(opts: { recorded?: boolean; dbPath?: string; kv?: Kv; ws?: string; now?: () => string } = {}) {
+  const dbPath = opts.dbPath ?? join(mkdtempSync(join(tmpdir(), 'ccmcp-')), 'test.kv');
+  const kv = opts.kv ?? newKv(dbPath), ws = opts.ws ?? newWs();
   let i = 0;
   const svc = new Service({
-    dbPath, content, interpreter: opts.recorded === false ? noneInterpreter : recordedInterpreter(RECORDED_INTENTS),
-    now: () => `2026-10-01T00:00:${String(i % 60).padStart(2, '0')}Z`, newId: (p) => `${p}_${++n}_${++i}`,
+    kv, ws, content, interpreter: opts.recorded === false ? noneInterpreter : recordedInterpreter(RECORDED_INTENTS),
+    now: opts.now ?? (() => `2026-10-01T00:00:${String(i % 60).padStart(2, '0')}Z`), newId: (p) => `${p}_${++n}_${++i}`,
   });
-  return { svc, dbPath };
+  return { svc, dbPath, kv, ws };
 }
 let c = 0;
 export const cmd = () => `cmd-${++c}`;
@@ -76,11 +87,11 @@ export const cmd = () => `cmd-${++c}`;
 /** Start the named recipe and replay a fixture through record_progress (the product path). */
 export async function startAt(svc: Service, recipeId: string, fixtureId: string | null) {
   const p = pack(recipeId);
-  const started = svc.startRecipe({ commandId: cmd(), recipeId, recipeVersionId: p.recipeHash });
+  const started = await svc.startRecipe({ commandId: cmd(), recipeId, recipeVersionId: p.recipeHash });
   if (started.outcome !== 'started') throw new Error(`start: ${JSON.stringify(started)}`);
   let run = started.run;
   for (const a of fixtureId ? fixtureActions(fixtureId) : []) {
-    const r = svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, ...a });
+    const r = await svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, ...a });
     if (r.outcome !== 'recorded') throw new Error(`progress: ${JSON.stringify(r)}`);
     run = r.run;
   }

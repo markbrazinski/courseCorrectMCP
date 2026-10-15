@@ -49,7 +49,7 @@ function helpers(c: WhyCtx) {
   const r = c.pack.recipe;
   const n = (u: IngredientUse) => stepOrder(r, u.stepId);
   const short = (u: IngredientUse) => { const i = getIngredient(r, u.ingredientId)!; return (i.kind && kindOf(c.v, i.kind.kindId)?.short) || lowerFirst(i.name); };
-  const by = (p: { status: string; by: string; ref?: string | null }) => (p.status === 'REVIEWED' ? (p.by === 'OWNER' ? 'reviewed by the owner' : p.ref?.startsWith('roles.json#') ? `machine-checked against the approved role table (${p.ref.slice('roles.json#'.length)})` : 'machine-checked against owner-approved content') : p.status === 'SOURCE_VERIFIED' ? 'read from the source' : p.status === 'CONFIRMED' ? 'confirmed' : 'not reviewed');
+  const by = (p: { status: string; by: string; ref?: string | null }) => (p.status === 'REVIEWED' ? (p.by === 'OWNER' ? 'reviewed by the owner' : p.ref?.startsWith('roles.json#') ? `machine-checked against the approved role table (${p.ref.slice('roles.json#'.length)})` : 'machine-checked against owner-approved content') : p.status === 'SOURCE_VERIFIED' ? 'read from the source' : p.status === 'CONFIRMED' ? (p.by === 'COOK' ? 'confirmed by you for this recipe' : 'confirmed') : 'not reviewed');
   return { r, n, short, by };
 }
 
@@ -79,7 +79,10 @@ function planOf(c: WhyCtx, b: Binding): ImportPlan | null {
   const steps = [...touched(r, b.ops).steps].map((id) => stepOrder(r, id)).sort((x, y) => x - y);
   const target = getUse(r, b.targetUseId)!;
   const basis: string[] = [];
-  if (b.card) basis.push('Written for this recipe by the import analysis (an AI model), then checked by code: amounts parsed, every use of the ingredient addressed, rewritten steps checked against the recipe.', 'Not reviewed and not kitchen-tested.');
+  // mechanical validity and culinary support said apart (2026-10-13)
+  if (b.card) basis.push('Written for this recipe by the import analysis (an AI model), then checked by code: amounts parsed, every use of the ingredient addressed, rewritten steps checked against the recipe.',
+    'Culinary support: none on file. Whether this replacement can do the job here is the AI\'s claim; no source or reviewed rule backs it.', 'Not reviewed and not kitchen-tested.');
+
   const entry = b.card ? c.pack.cards?.find((e) => e.useId === b.targetUseId) : undefined, repaired = entry?.normalized;
   // ccmcp-swaps-3: which of the ranked suggestions this is, and why each earlier one wasn't used
   const rank = entry?.alternates?.findIndex((a) => a.used) ?? -1;
@@ -89,6 +92,10 @@ function planOf(c: WhyCtx, b: Binding): ImportPlan | null {
   else {
     for (const u of [target, ...b.coveredSiblingUseIds.map((id) => getUse(r, id)!)]) {
       if (u.functions.length) basis.push(`What the ${short(u)} does in step ${n(u)} (${u.functions.map((f) => f.label ?? functionLabel(c.v, f.functionId)).join(', ')}): ${by(u.functions[0].prov)}`);
+      // the facts the cook confirmed for this recipe (2026-10-13), named as such
+      const k = getIngredient(r, u.ingredientId)?.kind;
+      if (k?.prov.by === 'COOK') basis.push(`That the ${lowerFirst(getIngredient(r, u.ingredientId)!.name)} is ${kindOf(c.v, k.kindId)?.label ?? k.kindId}: ${by(k.prov)}`);
+      if (u.technique?.prov.by === 'COOK') basis.push(`What is done with the ${short(u)} in step ${n(u)} (${c.v.techniques.find((t) => t.techniqueId === u.technique!.techniqueId)?.label ?? u.technique.techniqueId}): ${by(u.technique.prov)}`);
     }
     const p = c.patterns.find((x) => x.patternId === b.patternId && x.version === b.patternVersion);
     const scale = p?.kind === 'RECOVERY' ? Object.values(p.quantities).find((q) => q.kind === 'SCALE') : undefined;
@@ -102,6 +109,7 @@ function planOf(c: WhyCtx, b: Binding): ImportPlan | null {
     }
     if (b.quantityStatus === 'PROVISIONAL') basis.push('Quantities are provisional engineering content, not kitchen-tested.');
   }
+  if (!b.card) basis.push('Culinary support: a reviewed rule (sourced content the owner approved). Not kitchen-tested.');
   return {
     planId: b.bindingId, ruleId: b.card ? null : `${b.patternId}@${b.patternVersion}`, title: b.patternTitle, kind: replacements.length ? 'replacement' : 'omission',
     provenance: b.card ? { kind: 'aiPrepared', label: CARD_LABEL, basis } : { kind: 'reviewedRule', label: 'Reviewed change', basis },
@@ -125,7 +133,7 @@ function blockedText(c: WhyCtx, needs: CoverageEntry[]): string {
   const unread = ms.filter((m) => m.predicate === 'SOURCE_COVERAGE' || m.predicate === 'TIMING');   // closure 2026-10-08
   const review = ms.filter((m) => m.predicate !== 'AMOUNT_EXACT' && !unread.includes(m)).map((m: MissingFact) => {
     if (m.predicate === 'FUNCTION') { const u = getUse(r, m.subject.id); return u ? `what the ${short(u)} does in step ${n(u)}` : 'what the ingredient does'; }
-    if (m.predicate === 'TECHNIQUE') return `how step ${stepOrder(r, m.subject.id)} is done`;
+    if (m.predicate === 'TECHNIQUE') { const u = m.subject.kind === 'USE' ? getUse(r, m.subject.id) : undefined; return u ? `what is done with the ${short(u)} in step ${n(u)}` : `how step ${stepOrder(r, m.subject.id)} is done`; }
     return `that “${getIngredient(r, m.subject.id)?.name ?? 'the ingredient'}” is ${classLabel(c.v, m.expected)}`;
   });
   const titles = and(uniq(needs.map((e) => e.patternTitle.toLowerCase())));
@@ -188,18 +196,25 @@ export function analysisOf(c: WhyCtx, useId: Id, pending: boolean, memo = new Ma
   if (no?.card) return R('evaluatedNoOption', 'aiSaysNo', no.card.opinion, `${CARD_LABEL}: an opinion, not a reviewed rule`);
   const round = card?.repair ? `; correction round: ${card.repair.outcome}${card.repair.outcome === 'REPAIRED' || card.repair.outcome === 'STILL_INVALID' ? `, first draft rejected as ${card.repair.originalReason}` : card.repair.detail ? ` (${card.repair.detail})` : ''}` : '';
   const cardWhy = card?.status === 'INVALID' ? `${card.alternates ? `import cards (${card.alternates.length} ranked): ${card.alternates.map((a) => `${a.name}: ${a.reason}`).join('; ')}` : `import card: ${card.reason}`}${card.normalized?.length ? ` (after repairs: ${card.normalized.join('; ')})` : ''}${round}` : null;
-  if (needs.length) return R('blocked', 'missingFact', blockedText(c, needs), [...needs.flatMap((e) => e.missing.map((m) => missingText(c, m))), cardWhy].filter(Boolean).join('; '));
+  // waiting on a fact: a drafted alternative already answered by a sourced limit or a reviewed rule says so beside the question
+  const limit = card?.status === 'INVALID' && card.reason?.startsWith('EXCEEDS_SOURCED_LIMIT') ? card.reason.replace(/^EXCEEDS_SOURCED_LIMIT: [^:]+: /, '') : null;
+  const draftTitle = entries.find((e) => e.patternId === CARD_PATTERN)?.patternTitle;
+  const limitNote = limit ? ` The alternative drafted at import${draftTitle ? ` (${lowerFirst(draftTitle)})` : ''} isn’t offered: ${limit}` : '';
+  if (needs.length) return R('blocked', 'missingFact', blockedText(c, needs) + limitNote, [...needs.flatMap((e) => e.missing.map((m) => missingText(c, m))), cardWhy].filter(Boolean).join('; '));
   // a reviewed alternative this recipe ruled out keeps its reason visible beside a failed or missing AI check (closure 2026-10-08)
   const considered = entries.filter((e) => e.kind === 'RECOVERY' && ruledOut(e)).map((e) => ` The reviewed alternative (${e.patternTitle.toLowerCase()}) isn’t offered here: ${checkText(c, e)}.`).join('');
   if (cardWhy) {
     const code = card!.reason ?? '';
     if (code === 'NO_ANALYSIS' || code.includes('LIVE_ANALYSIS_REQUIRED')) return R('unexamined', 'notRun', `This use hasn’t been checked for alternatives: no analysis ran for this reading.${considered}`, cardWhy);
+    if (code === 'DRAFTED_BEFORE_CHOICE') return R('unexamined', 'contentChanged', `The alternatives drafted at import were written before you chose which option to use, so they aren’t offered for your choice. That isn’t a finding that the ${short(u)} can’t be replaced.${considered}`, cardWhy);
     if (code === 'STALE_ANALYSIS') return R('unexamined', 'contentChanged', 'The recipe changed after this use was checked, so that check no longer applies.', cardWhy);
     // technical failures stay "failed" (recoverable: checking again can change them), never worded as a finding about the food
     const notFinding = `That isn’t a finding that the ${short(u)} can’t be replaced.`;   // the page states the available action
     if (code.startsWith('FAILED_CALL')) return R('failed', 'analysisError', `The check for alternatives didn’t finish (a technical problem). ${notFinding}${considered}`, cardWhy);
     // a drafted alternative that reviewed content answers otherwise: that one replacement is answered (the draft and its
     // reasons are kept for the record); nothing else was drafted, which is not a finding that nothing else could work
+    // a drafted alternative beyond what sources support (an approved sourced limit): an explicit limitation, never a usable plan
+    if (limit) return R('evaluatedNoOption', 'unsupportedByEvidence', `${limitNote.trim()} No other alternative was drafted for this use.`, cardWhy);
     if (code.startsWith('CONTRADICTS_REVIEWED_RULE')) {
       const rule = /^CONTRADICTS_REVIEWED_RULE: "([^"]+)" [^:]+: (.*)$/.exec(code);
       const draft = entries.find((e) => e.patternId === CARD_PATTERN)?.patternTitle;

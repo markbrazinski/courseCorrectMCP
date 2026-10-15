@@ -17,7 +17,7 @@ async function mcp(page: Page, name: string, args: Record<string, unknown> = {})
   return ((await r.json()) as { result: { structuredContent: Record<string, any> } }).result.structuredContent;   // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
-test('explicit scone · upload → automatic analysis → both cream uses → save → reload → reopen → cook → rescue → accept → resume', async ({ page }) => {
+test('explicit scone · sample chip → automatic analysis → both cream uses → save → reload → reopen → cook → rescue → accept → resume', async ({ page }) => {
   const evidence: Record<string, unknown> = { kind: 'cc-explicit-scone-journey/1', at: new Date().toISOString(),
     pdf: { path: 'samples/scones-explicit.pdf', sha256: createHash('sha256').update(readFileSync(PDF)).digest('hex') },
     modes: { extraction: 'REPLAY_OF_LIVE_PROBES (cards2 live reading of these bytes)', swapAnalysis: 'REPLAY_OF_LIVE_CARD_PROBE (cards2, prompt ccmcp-swaps-2)', interpreter: 'RECORDED', paidCalls: 0 } };
@@ -26,8 +26,8 @@ test('explicit scone · upload → automatic analysis → both cream uses → sa
   page.on('request', (q) => { const p = new URL(q.url()).pathname; const m = /\/drafts\/([^/?]+)$/.exec(p); if (m) draftId = m[1]; if (p.startsWith('/authoring')) authoring.push(p); });
   await page.goto('/');
   await page.getByRole('button', { name: 'Add a recipe' }).first().click();
-  await page.getByLabel('Choose a recipe PDF').setInputFiles(PDF);
-  await page.getByRole('button', { name: 'Upload and read' }).click();
+  // the sample chip (owner 2026-10-13): the same bytes as choosing samples/scones-explicit.pdf, read the same way, no file of your own
+  await page.getByTestId('sample-chip').click();
   await expect(page.getByText('How scones-explicit.pdf was read')).toBeVisible({ timeout: 20_000 });
   evidence.summary = await page.getByTestId('analysis-summary').textContent();
   await shot(page, '01-matrix');

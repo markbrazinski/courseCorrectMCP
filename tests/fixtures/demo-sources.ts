@@ -15,7 +15,7 @@ export const SHORTCAKE_LINES = [
   '5. Pat into 6 rounds and bake for 15 minutes. Cool on a rack.', '6. Whip 240 ML heavy cream with 15 g sugar to soft peaks.',
   '7. Split the shortcakes and fill with the strawberries and whipped cream.',
 ];
-/** The approved risotto (content/approved/recipes/risotto.demo.json) as a printed recipe: its rendered steps, verbatim. */
+/** The approved risotto (content/approved/recipes/risotto.json) as a printed recipe: its rendered steps, verbatim. */
 export const RISOTTO_LINES = [
   'Risotto with Parmesan', 'Serves 4 · about 45 minutes',
   '900 ML unsalted vegetable stock', '60 g butter', '1 onion, finely chopped', '1 clove garlic, minced', '300 g Arborio rice', '120 ML dry white wine', '50 g Parmesan, grated', 'Salt, to taste',

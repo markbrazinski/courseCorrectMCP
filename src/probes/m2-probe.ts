@@ -12,7 +12,8 @@ import { compile } from '../compile/binder.ts';
 import { hash, sha256 } from '../domain/rational.ts';
 import { loadContent } from '../service/content.ts';
 import { interpretPromptIdentity, novaInterpreter } from '../service/interpret.ts';
-import { Store } from '../service/store.ts';
+import { SqliteKv } from '../service/kv-sqlite.ts';
+import { modelRows } from './records.ts';
 import { LEMON_PAGE1, LEMON_PASTED, SCONE_LINES, SHORTCAKE_LINES } from '../../tests/fixtures/demo-sources.ts';
 import { makePdf, scanImage } from '../../tests/fixtures/pdf.ts';
 
@@ -100,8 +101,8 @@ async function run() {
   console.log(`identity: ${identity.principal}`);
   if (!identity.ok) throw new Error('NOT the non-root CourseCorrect identity: no call made');
   mkdirSync(join(root, '.artifacts/probes'), { recursive: true });
-  const store = new Store(join(root, `.artifacts/probes/m2-${Date.now()}.db`));
-  const authoring = new Authoring({ store, content, extractor: novaExtractor(nova) });
+  const kv = new SqliteKv(join(root, `.artifacts/probes/m2-${Date.now()}.kv`));
+  const authoring = new Authoring({ kv, content, extractor: novaExtractor(nova) });
   const out: Record<string, unknown>[] = [];
   const draftOf: Record<string, string> = {};
   const save = () => writeFileSync(resultsPath, JSON.stringify({ kind: 'cc-m2-probe-results/1', at: new Date().toISOString(), identity: identity.principal, ledger: ledger.totals(), results: out }, null, 2));
@@ -111,7 +112,7 @@ async function run() {
     let jobId: string, draftId: string;
     if (e.appendTo) {
       draftId = draftOf[e.appendTo];
-      jobId = authoring.appendText(draftId, { expectedRevision: authoring.revision(draftId), text: bytes.toString('utf8') }).job.id;
+      jobId = (await authoring.appendText(draftId, { expectedRevision: await authoring.revision(draftId), text: bytes.toString('utf8') })).job.id;
     } else {
       const r = await authoring.createImport(e.kind === 'pdf' ? { kind: 'pdf', bytes: new Uint8Array(bytes), filename: e.input } : { kind: 'text', text: bytes.toString('utf8') });
       if (r.status !== 202) { out.push({ id: e.id, error: r.error }); save(); continue; }
@@ -119,12 +120,12 @@ async function run() {
     }
     draftOf[e.id] = draftId;
     const job = await authoring.waitForJob(jobId);
-    const ex = store.get<Record<string, unknown>>('SELECT * FROM extractions WHERE job_id = ?', jobId);
-    const d = job.state === 'failed' ? null : authoring.getDraft(draftId).draft;
+    const ex = (await modelRows(kv, authoring.ws, draftId)).extractions.find((x) => x.job_id === jobId);
+    const d = job.state === 'failed' ? null : (await authoring.getDraft(draftId)).draft;
     const c = d?.content;
     const uses = (name: string) => c?.ingredients.find((i) => i.name.toLowerCase() === name.toLowerCase())?.uses.map((u) => c.steps.find((s) => s.id === u.stepId)!.ordinal) ?? null;
     const exp = e.expect as Record<string, unknown> & { multiUse?: { name: string; steps: number[] } };
-    const eff = authoring.effective(draftId);
+    const eff = await authoring.effective(draftId);
     const split = eff ? compile(eff, content.vocab, content.patterns).pack?.coverage.find((x) => x.patternId === 'split') : undefined;
     const checks: Record<string, boolean> = { job: job.state === exp.job };
     if (exp.ingredients !== undefined) checks.ingredients = c?.ingredients.length === exp.ingredients;

@@ -9,6 +9,7 @@
   "scripts": {
     "typecheck": "tsc -p . && tsc -p src/web",
     "test": "vitest run",
+    "test:dynamodb-local": "CC_TEST_DYNAMO_ENDPOINT=${CC_TEST_DYNAMO_ENDPOINT:-http://127.0.0.1:8000} AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local AWS_REGION=us-east-1 sh -c 'node --disable-warning=ExperimentalWarning tests/support/dynamo-local.ts && vitest run'",
     "serve": "node --disable-warning=ExperimentalWarning src/service/main.ts",
     "walkthrough": "node --disable-warning=ExperimentalWarning src/walkthrough.ts",
     "walkthrough:m2": "node --disable-warning=ExperimentalWarning src/walkthrough-m2.ts",
@@ -21,11 +22,18 @@
     "evidence:m3": "node --disable-warning=ExperimentalWarning src/probes/m3-evidence.ts",
     "transfer": "node --disable-warning=ExperimentalWarning src/probes/transfer.ts",
     "probe:cards": "node --disable-warning=ExperimentalWarning src/probes/cards-probe.ts",
-    "probe:cards2": "node --disable-warning=ExperimentalWarning src/probes/cards2-probe.ts"
+    "probe:cards2": "node --disable-warning=ExperimentalWarning src/probes/cards2-probe.ts",
+    "cc": "node --disable-warning=ExperimentalWarning src/ops/cc.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1139.0",
+    "@aws-sdk/client-dynamodb": "3.1145.0",
+    "@aws-sdk/client-lambda": "3.1145.0",
     "@aws-sdk/client-polly": "3.1145.0",
+    "@aws-sdk/client-s3": "3.1145.0",
+    "@aws-sdk/client-sts": "3.1145.0",
+    "@aws-sdk/client-textract": "3.1145.0",
+    "@hono/node-server": "2.1.3",
     "@modelcontextprotocol/sdk": "1.30.1",
     "pdfjs-dist": "^6.3.289",
     "react": "19.3.0",

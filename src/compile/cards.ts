@@ -3,10 +3,10 @@
 // ordinary bindings that go through the same dry run and runtime checks as reviewed patterns. Reviewed patterns stay a
 // cross-check: where one binds a use, its plan is used and the card is only recorded (with any disagreement).
 import { z } from 'zod';
-import type { Amount, Binding, CardEntry, CardSource, CoverageEntry, FunctionMapEntry, Id, IngredientUse, Op, Pattern, Provenance, Recipe, RecipePack, Vocabulary } from '../contract/types.ts';
+import type { Amount, Binding, CardEntry, CardSource, CoverageEntry, FunctionMapEntry, Id, IngredientUse, Op, Pattern, Provenance, Recipe, RecipePack, SourcedLimit, Vocabulary } from '../contract/types.ts';
 import { cmp, hash, mul, rat } from '../domain/rational.ts';
 import { amountDisplay, getIngredient, getStep, getUse, lowerFirst, parseAmount, proseLint, renderStep, stepOrder, upperFirst, useLabel } from '../domain/recipe.ts';
-import { bareName, classesOfKind, kindByName, kindNames, kindOf, normName, sameSet } from '../domain/vocabulary.ts';
+import { bareName, classesOfKind, kindByName, kindNames, kindOf, normName, sameSet, settled } from '../domain/vocabulary.ts';
 import { factsHashOf } from '../engine/evaluate.ts';
 import { dryRun } from './binder.ts';
 
@@ -14,15 +14,19 @@ import { dryRun } from './binder.ts';
 export const CARD_PATTERN = 'import-card';
 export const CARD_LABEL = 'Prepared at import (AI)';
 
+/** ccmcp-swaps-4: the replacement is not in the Kinds list, said explicitly (a model forced to pick fills the nearest kind:
+ *  "fresh oregano" as salt). It reads as no kind: the card stays provisional, and no reviewed rule can match it. */
+export const UNLISTED = 'unlisted';
 export function cardSchema(v: Vocabulary) {
   const fns = v.functions.map((f) => f.functionId) as [string, ...string[]];
-  const kinds = v.kinds.map((k) => k.kindId) as [string, ...string[]];
+  const kinds = [...v.kinds.map((k) => k.kindId), UNLISTED] as unknown as [string, ...string[]];
   const ingredient = { ingredient: z.string().min(1).max(60), kindId: z.enum(kinds).nullable(), amountText: z.string().min(1).max(40) };
   const card = z.strictObject({
     useRef: z.string().regex(/^U\d{1,3}$/), role: z.string().min(1).max(120), functions: z.array(z.enum(fns)).min(1).max(4),
     verdict: z.enum(['swap', 'omit', 'no']),
     swap: z.strictObject({ ...ingredient, otherIngredients: z.array(z.strictObject(ingredient)).max(3) }).nullable(),
-    stepRewrites: z.array(z.strictObject({ stepRef: z.string().regex(/^S\d{1,3}$/), text: z.string().min(1).max(600) })).max(4),
+    // ccmcp-swaps-5: `replaces` (a long step's sentences, copied exactly) changes only those; a whole-step text may be as long as a step
+    stepRewrites: z.array(z.strictObject({ stepRef: z.string().regex(/^S\d{1,3}$/), text: z.string().min(1).max(1200), replaces: z.string().min(1).max(600).nullable().optional() })).max(4),
     siblings: z.array(z.strictObject({ useRef: z.string().regex(/^U\d{1,3}$/), handling: z.enum(['coveredBy', 'unchanged', 'cantCover']), note: z.string().min(1).max(200) })).max(8),
     tradeoff: z.string().min(1).max(240).nullable(),
     opinion: z.string().min(1).max(240),
@@ -63,16 +67,26 @@ const ARTICLE = /^(?:the|a|an)\s+/i;
 const norm = normName, bare = bareName, namesOf = kindNames;   // identity lives in domain/vocabulary.ts (one rule for cards and readings)
 
 class Invalid extends Error {}
+/** The use is where its step's text says it is: a token, or the group words it is named by (B8). */
+export const locatedInStep = (r: Recipe, u: IngredientUse) => {
+  const t = getStep(r, u.stepId)!.text;
+  return t.includes(`{use:${u.useId}}`) || (!!u.groupText && t.toLowerCase().includes(u.groupText.toLowerCase()));
+};
 const fail = (reason: string): never => { throw new Invalid(reason); };
 
 /** Amount words → amount. Qualitative words ("a little") stay as written; words with a number that don't parse fail. */
 function amountOf(text: string, vol: Recipe['volumeSystem'], what: string): Amount {
   const a = parseAmount(text, vol);
-  if (a.kind === 'UNSPECIFIED' || (a.kind === 'AS_WRITTEN' && (/\d|[½¼¾⅓⅔]/.test(a.text) || !a.text.trim()))) fail(`UNPARSEABLE_AMOUNT: ${what} "${text}"`);
+  if (a.kind === 'UNSPECIFIED' || a.kind === 'RANGE' || (a.kind === 'AS_WRITTEN' && (/\d|[½¼¾⅓⅔]/.test(a.text) || !a.text.trim()))) fail(`UNPARSEABLE_AMOUNT: ${what} "${text}"`);
   return a;
 }
 const comparable = (a: Amount) => (a.kind === 'EXACT' ? { value: a.value, dim: a.unit === 'COUNT' ? 'COUNT' : 'MASS_OR_VOLUME' } : null);   // g ≈ ML for a sanity bound only
 
+/** The whole name in a rewrite, with the article before it ("the red bell peppers"): [start, end), else null. */
+function nameSpan(text: string, name: string): [number, number] | null {
+  const m = new RegExp(`(?<![\\p{L}\\p{N}])(?:(?:the|a|an|some)\\s+)?${esc(name.trim())}(?![\\p{L}\\p{N}])`, 'iu').exec(text);
+  return m ? [m.index, m.index + m[0].length] : null;
+}
 /** [start, end) of "<amount> … <name>" (or the name alone) in a rewrite. */
 function mention(text: string, amount: string | null, name: string): [number, number] | null {
   const head = esc(name.trim().split(/\s+/).pop()!.replace(/[^\p{L}\p{N}-]/gu, ''));
@@ -85,7 +99,10 @@ function guardText(field: string, text: string, corpus: string, v: Vocabulary, a
   const t = text.toLowerCase().replace(/[’]/g, "'");
   for (const m of t.match(NUM) ?? []) if (!corpus.includes(m)) fail(`INVENTED_NUMBER: ${field} "${m}"`);
   const terms = new Set(v.kinds.flatMap((k) => [k.label, k.short, ...k.aliases]).map((x) => x.toLowerCase()));
-  for (const term of terms) if (new RegExp(`\\b${esc(term)}\\b`).test(t) && !corpus.includes(term)) fail(`INVENTED_INGREDIENT: ${field} "${term}"`);
+  // a name of several words is in the recipe when each of its words is, in any order (corpus d05: "egg yolks" for "Yolks 2 eggs")
+  const stems = (x: string) => x.match(/\p{L}+/gu)?.map((w) => w.replace(/s$/, '')) ?? [], said = new Set(stems(corpus));
+  const inRecipe = (term: string) => corpus.includes(term) || (stems(term).length > 1 && stems(term).every((w) => said.has(w)));
+  for (const term of terms) if (new RegExp(`\\b${esc(term)}\\b`).test(t) && !inRecipe(term)) fail(`INVENTED_INGREDIENT: ${field} "${term}"`);
   const a = alt ? alt.exec(t) : null;
   if (a) fail(`SUGGESTS_ALTERNATIVE: ${field} "${a[0]}"`);
   if (sameCheck && SAME.test(t)) fail(`CLAIMS_EQUIVALENT: ${field}`);
@@ -122,7 +139,7 @@ function checkOne(c: RawCard, refs: Refs, r: Recipe, v: Vocabulary): CardPlan {
       const k = x.kindId ? kindOf(v, x.kindId) : undefined;
       if (k && !namesOf(k).includes(bare(x.ingredient))) fail(`KIND_MISMATCH: "${x.ingredient.trim()}" isn't ${k.label}`);
     }
-    if (existingIngredient(r, { name: c.swap.ingredient.trim(), kindId: c.swap.kindId }, v)?.ingredientId === ing.ingredientId) fail(`SWAP_IS_SAME_INGREDIENT: ${c.swap.ingredient.trim()} resolves to ${ing.name}`);
+    if (sameIngredient(ing, { name: c.swap.ingredient.trim(), kindId: c.swap.kindId }, v)) fail(`SWAP_IS_SAME_INGREDIENT: ${c.swap.ingredient.trim()} resolves to ${ing.name}`);
   }
   const alt = c.verdict === 'swap' ? ALT_SWAP : ALT_NO;
   guardText('opinion', plan.opinion, corpus, v, alt, true);
@@ -165,14 +182,41 @@ function checkOne(c: RawCard, refs: Refs, r: Recipe, v: Vocabulary): CardPlan {
     if (!allowed.has(stepId)) fail(`REWRITE_OUTSIDE_SWAP: step ${stepOrder(r, stepId)}`);
     if (plan.texts[stepId] !== undefined) fail(`REWRITE_TWICE: step ${stepOrder(r, stepId)}`);
     if (/[{}]/.test(w.text)) fail('REWRITE_HAS_BRACES');
-    const text = w.text.trim();
+    const rendered = renderStep(r, getStep(r, stepId)!);
+    let text = w.text.trim();
+    if (w.replaces) {   // a targeted change: those sentences replaced, the rest of the step exactly as the recipe words it
+      const from = w.replaces.trim(), at = rendered.indexOf(from);
+      if (at < 0 || rendered.indexOf(from, at + 1) >= 0) fail(`REPLACES_NOT_IN_STEP: step ${stepOrder(r, stepId)}`);
+      text = `${rendered.slice(0, at)}${text}${rendered.slice(at + from.length)}`.replace(/\s+/g, ' ').trim();
+    }
+    // every sentence that doesn't name the replaced ingredient stays as the recipe words it (2026-10-13: a long step's rewrite may
+    // not quietly change its other instructions, and a targeted change can't either)
+    // A sentence may change when it names a replaced use: its words, its group's words, or its ingredient's name or that name's last
+    // word ("the meals" for graham meal). Compared on words only (punctuation and a step's leading "Heading:" label don't count).
+    const wordsOf = (x: string) => x.toLowerCase().replace(/^[^.:;]{1,40}:\s+/, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const named = [...new Set([target, ...plan.covered.map((id) => getUse(r, id)!)].filter((u) => u.stepId === stepId)
+      .flatMap((u) => { const n = bare(getIngredient(r, u.ingredientId)!.name); return [u.displayText, u.groupText, n, n.split(/\s+/).pop()!.replace(/e?s$/, '')]; })
+      .filter((x): x is string => !!x && x.length >= 3).map((x) => wordsOf(x.replace(ARTICLE, ''))))];
+    const after = ` ${wordsOf(text)} `;
+    for (const sentence of rendered.split(/(?<=[.!?;])\s+/).filter((x) => wordsOf(x))) {
+      const w = wordsOf(sentence);
+      if (named.some((x) => ` ${w} `.includes(` ${x}`))) continue;
+      if (!after.includes(` ${w} `)) fail(`REWRITE_CHANGES_OTHER_TEXT: step ${stepOrder(r, stepId)} no longer says "${sentence.trim().slice(0, 120)}"`);
+    }
     const spans: { at: [number, number]; key: string }[] = [];
+    const built: Record<string, string> = {};
     const want = (key: string, amount: string | null, name: string) => {
-      const at = mention(text, amount, name);
+      let at = mention(text, amount, name);
+      // B6: the rewrite names the new ingredient but not its amount (recipes keep amounts in the list): code states it, from
+      // the card's own amount (parsed and bounded above), in place of the name; the words are never taken as the amount
+      if (!at && amount && (at = nameSpan(text, name))) built[key] = `${amount} ${lowerFirst(name.trim())}`;
       if (!at) fail(`REWRITE_MISSING_AMOUNT: step ${stepOrder(r, stepId)} doesn't say ${amount ? `${amount} ` : ''}${name}`);
       spans.push({ at: at!, key });
     };
-    if (stepId === target.stepId && plan.main) want('@main', amountDisplay(plan.main.amount), plan.main.name);
+    // B8: a use named only through its group ("Combine the Rub ingredients") isn't named in the step: its replacement needn't
+    // be either, as long as the group's words stay
+    const viaGroup = !!target.groupText && text.toLowerCase().includes(target.groupText.toLowerCase());
+    if (stepId === target.stepId && plan.main && !viaGroup) want('@main', amountDisplay(plan.main.amount), plan.main.name);
     if (stepId === target.stepId) plan.others.forEach((o, i) => want(`@o${i}`, amountDisplay(o.amount), o.name));
     for (const id of plan.covered.filter((x) => getUse(r, x)!.stepId === stepId)) {
       const a = getUse(r, id)!.amount;
@@ -187,11 +231,14 @@ function checkOne(c: RawCard, refs: Refs, r: Recipe, v: Vocabulary): CardPlan {
       if (!hit) fail(`REWRITE_DROPS_INGREDIENT: step ${stepOrder(r, stepId)} no longer names ${useLabel(r, u)}`);
       spans.push({ at: [hit![0], hit![0] + hit![1]], key: u.useId });
     }
+    for (const u of r.uses.filter((x) => x.stepId === stepId && !replaced.has(x.useId) && x.groupText)) {   // the group's words name the others
+      if (!text.toLowerCase().includes(u.groupText!.toLowerCase())) fail(`REWRITE_DROPS_INGREDIENT: step ${stepOrder(r, stepId)} no longer says "${u.groupText}"`);
+    }
     spans.sort((a, b) => a.at[0] - b.at[0]);
     spans.forEach((s, i) => { if (i && s.at[0] < spans[i - 1].at[1]) fail(`REWRITE_AMBIGUOUS: step ${stepOrder(r, stepId)}`); });
     let out = text;
     for (const s of [...spans].reverse()) {
-      if (s.key.startsWith('@')) plan.display[s.key] = text.slice(s.at[0], s.at[1]);
+      if (s.key.startsWith('@')) plan.display[s.key] = built[s.key] ?? text.slice(s.at[0], s.at[1]);
       out = `${out.slice(0, s.at[0])}{use:${s.key}}${out.slice(s.at[1])}`;
     }
     const lint = proseLint(out);
@@ -206,9 +253,9 @@ function checkOne(c: RawCard, refs: Refs, r: Recipe, v: Vocabulary): CardPlan {
     }
     plan.texts[stepId] = out;
   }
-  if ((c.verdict === 'omit' || plan.others.length) && plan.texts[target.stepId] === undefined) fail(`REWRITE_REQUIRED: step ${stepOrder(r, target.stepId)}`);
-  for (const u of [target, ...plan.covered.map((id) => getUse(r, id)!)]) {   // a use changed without a rewrite must be a token in its step
-    if (plan.texts[u.stepId] === undefined && !getStep(r, u.stepId)!.text.includes(`{use:${u.useId}}`)) fail(`USE_NOT_LOCATED_IN_TEXT: step ${stepOrder(r, u.stepId)}`);
+  if ((plan.others.length || (c.verdict === 'omit' && !target.groupText)) && plan.texts[target.stepId] === undefined) fail(`REWRITE_REQUIRED: step ${stepOrder(r, target.stepId)}`);
+  for (const u of [target, ...plan.covered.map((id) => getUse(r, id)!)]) {   // a use changed without a rewrite must be a token in its step, or named there by its group
+    if (plan.texts[u.stepId] === undefined && !locatedInStep(r, u)) fail(`USE_NOT_LOCATED_IN_TEXT: step ${stepOrder(r, u.stepId)}`);
   }
   return plan;
 }
@@ -244,13 +291,14 @@ const cardList = (raw: unknown): unknown[] | null => (raw && typeof raw === 'obj
 
 /** Validate the model's cards against this recipe. Every ADD use gets an entry; `failure` (no analysis) fails them all.
  *  A use sent to the correction round is judged by its corrected card, through the same checks, when exactly one came back. */
-export function checkCards(raw: unknown, refs: Refs | null, r: Recipe, v: Vocabulary, failure: string | null, repair: RepairRound | null = null): CheckedCards {
+/** `unanswered`: uses whose analysis call didn't answer (a batch of a partial analysis) and why; they fail with that reason. */
+export function checkCards(raw: unknown, refs: Refs | null, r: Recipe, v: Vocabulary, failure: string | null, repair: RepairRound | null = null, unanswered?: ReadonlyMap<Id, string>): CheckedCards {
   const adds = r.uses.filter((u) => u.kind === 'ADD');
   const plans = new Map<Id, CardPlan[]>();
   const tried = new Map<Id, { name: string; reason: string | null }[]>();
   const reasons = new Map<Id, string>();
   const verdicts = new Map<Id, { verdict: CardEntry['verdict']; role: string | null; opinion: string | null }>();
-  const list = !failure && refs ? cardList(raw) : null;
+  const list = !failure && refs ? cardList(raw) ?? (unanswered?.size ? [] : null) : null;
   if (!list) for (const u of adds) reasons.set(u.useId, failure ?? 'SCHEMA: no card list');
   const schema = cardSchema(v).card;
   const byUse = new Map<Id, unknown[]>();
@@ -273,6 +321,7 @@ export function checkCards(raw: unknown, refs: Refs | null, r: Recipe, v: Vocabu
     const { card: c0, notes } = normalize(card, refs!, r);
     const parsed = schema.safeParse(c0);
     if (!parsed.success) return { reason: `SCHEMA: ${parsed.error.issues.slice(0, 2).map((i) => `${i.path.join('.')} ${i.message}`).join('; ')}`, notes };
+    for (const x of parsed.data.swap ? [parsed.data.swap, ...parsed.data.swap.otherIngredients] : []) if (x.kindId === UNLISTED) x.kindId = null;
     const verdict = { verdict: parsed.data.verdict, role: parsed.data.role, opinion: parsed.data.opinion };
     try { return { plan: checkOne(parsed.data, refs!, r, v), notes, verdict }; }
     catch (e) { if (e instanceof Invalid) return { reason: e.message, notes, verdict }; throw e; }
@@ -290,6 +339,7 @@ export function checkCards(raw: unknown, refs: Refs | null, r: Recipe, v: Vocabu
       plans: ok.map((x) => x.plan!), tries: cs.length > 1 ? cs.map((c, i) => ({ name: nameOf(c), reason: xs[i].reason ?? null })) : [] };
   };
   for (const u of list ? adds : []) {
+    if (!byUse.has(u.useId) && unanswered?.has(u.useId)) { reasons.set(u.useId, unanswered.get(u.useId)!); continue; }
     let x = one(byUse.get(u.useId) ?? []);
     const q = repair?.requested.find((y) => refs!.uses[y.useRef] === u.useId);
     if (q) {
@@ -314,13 +364,19 @@ export function checkCards(raw: unknown, refs: Refs | null, r: Recipe, v: Vocabu
 
 // ---------- compile: card → ordinary binding ----------
 const and = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}` : xs[0] ?? '');
-/** The recipe ingredient a replacement is (the binding uses the same resolution): same kind, or the same name once
- *  preparation words are set aside ("cold butter" is the butter; "fresh strawberries" are the strawberries). */
-const existingIngredient = (r: Recipe, x: Pick<NewIngredient, 'name' | 'kindId'>, v: Vocabulary) => {
-  const k = x.kindId ?? kindByName(v, x.name)?.kindId;   // a true alias names the same ingredient ("all-purpose flour" is the plain flour)
+/** Is the replacement this recipe ingredient (same kind, or the same name once preparation words are set aside: "cold butter"
+ *  is the butter)? A true alias names the same ingredient ("all-purpose flour" is the plain flour). */
+const sameIngredient = (i: Recipe['ingredients'][number], x: Pick<NewIngredient, 'name' | 'kindId'>, v: Vocabulary) => {
+  const k = x.kindId ?? kindByName(v, x.name)?.kindId;
   // the recipe ingredient's identity: a reviewed kind, else its own name, else (unconfirmed) the reading's tag
-  const own = (i: Recipe['ingredients'][number]) => (i.kind?.prov.status === 'REVIEWED' ? i.kind.kindId : kindByName(v, i.name)?.kindId ?? i.kind?.kindId);
-  return r.ingredients.find((i) => (k && own(i) === k) || bare(i.name) === bare(x.name));
+  const own = i.kind && settled(i.kind.prov) ? i.kind.kindId : kindByName(v, i.name)?.kindId ?? i.kind?.kindId;
+  return (!!k && own === k) || bare(i.name) === bare(x.name);
+};
+/** The one recipe ingredient a replacement is, for the binding to reuse. The same ingredient listed twice (a marinade's and a
+ *  sauce's garam masala, 2026-10-13) is ambiguous: no line is guessed, the replacement becomes an ingredient of its own. */
+const existingIngredient = (r: Recipe, x: Pick<NewIngredient, 'name' | 'kindId'>, v: Vocabulary) => {
+  const hits = r.ingredients.filter((i) => sameIngredient(i, x, v));
+  return hits.length === 1 ? hits[0] : undefined;
 };
 const label = (n: NewIngredient) => `${amountDisplay(n.amount)} ${lowerFirst(n.name)}`;
 
@@ -362,6 +418,8 @@ function bindCard(p: CardPlan, r: Recipe, v: Vocabulary): Binding {
     useId: gid(key), ingredientId: ingredientFor(x), stepId, kind: 'ADD', preparesUseId: null, amount, amountProv: prov,
     displayText: p.display[key] ?? null, prepNote: null, optional: false, allowance: null,
     functions: (from?.functions ?? []).map((f) => ({ functionId: f.functionId, label: f.label, prov })),
+    ...(from?.groupText && p.display[key] === undefined ? { groupText: from.groupText } : {}),
+    ...(from?.technique && from.stepId === stepId ? { technique: from.technique } : {}),   // the cook's answer for the replaced use
   });
   const ids: Record<string, Id> = {};
   if (p.verdict === 'swap') {
@@ -411,7 +469,7 @@ function targetsAsRead(p: Pattern, r: Recipe, u: IngredientUse, v: Vocabulary, c
   if (!kind || !classesOfKind(v, kind).includes(p.target.ingredientClass)) return false;
   if (!p.target.performsAll.every((f) => u.functions.some((x) => x.functionId === f))) return false;
   const step = getStep(r, u.stepId)!;
-  if (step.technique?.techniqueId !== p.target.stepTechnique && !(cues[p.target.stepTechnique] ?? []).some((c) => new RegExp(c, 'i').test(renderStep(r, step)))) return false;
+  if ((u.technique ?? step.technique)?.techniqueId !== p.target.stepTechnique && !(cues[p.target.stepTechnique] ?? []).some((c) => new RegExp(c, 'i').test(renderStep(r, step)))) return false;
   return p.applicability.every((q) => q.kind !== 'AMOUNT_IN_RANGE' || q.slot !== '$target'
     || (u.amount.kind === 'EXACT' && u.amount.unit === q.unit && cmp(u.amount.value, q.min) >= 0 && cmp(u.amount.value, q.max) <= 0));
 }
@@ -448,6 +506,31 @@ function contradiction(plan: CardPlan, pack: RecipePack, v: Vocabulary, patterns
   return null;
 }
 
+/**
+ * A sourced amount limit the plan exceeds (approved content; none in R1): the use does a job the limit names (its role as read or
+ * approved, never the card's own claim) and the plan puts in an ingredient of a limited class at more than the sourced fraction of
+ * the replaced amount, or at an amount that can't be compared with it. The reason, else null. (2026-10-13: 7/8 cup lemon juice for
+ * 7/8 cup milk passed every mechanical check.)
+ */
+function exceedsLimit(plan: CardPlan, r: Recipe, v: Vocabulary, limits: SourcedLimit[]): string | null {
+  if (plan.verdict !== 'swap' || !limits.length) return null;
+  // the jobs as read, plus the card's own claim: an unreviewed claim may restrict a card, never enable one (corpus d10: the reading
+  // gave the sour milk only ACIDITY; the card offering 2 cups lemon juice for it called it "liquid and acidity")
+  const target = getUse(r, plan.useId)!, ing = getIngredient(r, target.ingredientId)!, jobs = [...target.functions.map((f) => f.functionId), ...plan.functions];
+  const single = r.uses.filter((u) => u.ingredientId === ing.ingredientId && u.kind === 'ADD').length === 1;
+  const base = target.amount.kind === 'EXACT' ? target.amount : single && ing.listed.kind === 'EXACT' ? ing.listed : null;
+  for (const l of limits) {
+    if (!l.replacing.some((f) => jobs.includes(f))) continue;
+    for (const x of [plan.main!, ...plan.others]) {
+      const k = kindFor(v, x);
+      if (!k || !classesOfKind(v, k).some((c) => l.classes.includes(c))) continue;
+      const within = !!base && x.amount.kind === 'EXACT' && x.amount.unit === base.unit && base.unit !== 'COUNT' && cmp(x.amount.value, mul(base.value, l.maxFraction)) <= 0;
+      if (!within) return `${l.limitId}@${l.version}: ${l.reason}`;
+    }
+  }
+  return null;
+}
+
 /** P is the refused replacement or a part of it (non-empty). */
 const within = (P: Id[], refused: Id[]) => P.length > 0 && P.every((c) => refused.includes(c));
 /** The classes a card's replacement realizes ([] when any of its kinds is unknown). */
@@ -458,7 +541,7 @@ const classesOf = (plan: CardPlan, v: Vocabulary) => {
 
 /** Add card bindings to a compiled pack. A reviewed recovery wins its use; a reviewed refusal answers only the replacement
  *  it names (G13, commission 2026-10-08): its presence never hides an unrelated card plan, and no card contradicts it. */
-export function addCards(pack: RecipePack, checked: CheckedCards, v: Vocabulary, patterns: Pattern[] = [], cues: Record<Id, string[]> = {}): RecipePack {
+export function addCards(pack: RecipePack, checked: CheckedCards, v: Vocabulary, patterns: Pattern[] = [], cues: Record<Id, string[]> = {}, limits: SourcedLimit[] = []): RecipePack {
   const r = pack.recipe;
   const bindings = [...pack.bindings], coverage = [...pack.coverage], warnings = [...pack.warnings];
   const entries = checked.entries.map((e) => ({ ...e, ...(e.repair ? { repair: { ...e.repair } } : {}), ...(e.alternates ? { alternates: e.alternates.map((a) => ({ ...a })) } : {}) }));
@@ -483,6 +566,8 @@ export function addCards(pack: RecipePack, checked: CheckedCards, v: Vocabulary,
       const no = (reason: string, title = cardTitle(plan, ingName), status: CoverageEntry['status'] = 'NOT_APPLICABLE') => { failed.push({ reason, title, status }); if (open[k]) open[k].reason = reason; };
       const against = contradiction(plan, pack, v, patterns, cues);
       if (against) { no(`CONTRADICTS_REVIEWED_RULE: ${against}`); continue; }
+      const over = exceedsLimit(plan, r, v, limits);
+      if (over) { no(`EXCEEDS_SOURCED_LIMIT: ${over}`); continue; }
       if (rec) {
         e.status = 'SUPERSEDED'; e.reason = `reviewed "${rec.patternTitle}" is used; the card said ${plan.verdict} (${plan.verdict === 'swap' ? 'agrees' : 'disagrees'})`;
         coverage.push(cover(e, cardTitle(plan, ingName), 'NOT_APPLICABLE', 'CARD_SUPERSEDED'));
@@ -510,13 +595,14 @@ export function addCards(pack: RecipePack, checked: CheckedCards, v: Vocabulary,
     }
   }
   const cardSetHash = hash({ entries, bindings: bindings.filter((b) => b.card) });
-  const packHash = hash({ recipeHash: pack.recipeHash, vocabularyHash: pack.vocabularyHash, patternSetHash: pack.patternSetHash, engineSemantics: pack.engineSemantics, cardSetHash });
+  const packHash = hash({ recipeHash: pack.recipeHash, vocabularyHash: pack.vocabularyHash, patternSetHash: pack.patternSetHash, engineSemantics: pack.engineSemantics, cardSetHash,
+    ...(pack.knowledgeReleaseId ? { knowledgeReleaseId: pack.knowledgeReleaseId } : {}) });
   return { ...pack, packHash, bindings, coverage, warnings, cards: entries, cardSetHash };
 }
 
 // ---------- the bounded correction round: what to send ----------
 /** Rejections that are authority decisions (a reviewed rule said otherwise) or whole-analysis failures: never sent. */
-const NOT_REPAIRABLE = /^(?:CONTRADICTS_REVIEWED_RULE|COVERS_A_REFUSED_USE|NO_ANALYSIS|STALE_ANALYSIS|FAILED_CALL|SCHEMA: no card list|LIVE_ANALYSIS_REQUIRED)/;
+const NOT_REPAIRABLE = /^(?:DRAFTED_BEFORE_CHOICE|CONTRADICTS_REVIEWED_RULE|EXCEEDS_SOURCED_LIMIT|COVERS_A_REFUSED_USE|NO_ANALYSIS|STALE_ANALYSIS|FAILED_CALL|SCHEMA: no card list|LIVE_ANALYSIS_REQUIRED)/;
 /** Every card the checks rejected for a reason the model can fix, unless reviewed content already decides its use. */
 export function repairRequests(pack: RecipePack, refs: Refs, raw: unknown) {
   const r = pack.recipe;

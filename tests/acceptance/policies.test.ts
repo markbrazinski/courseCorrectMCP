@@ -17,10 +17,11 @@ import type { UseAnalysis } from '../../src/contract/analysis.ts';
 import type { RecipePack, Vocabulary } from '../../src/contract/types.ts';
 import { identityErrors, kindByName } from '../../src/domain/vocabulary.ts';
 import { Service } from '../../src/service/commands.ts';
+import { wsPk } from '../../src/service/kv.ts';
 import { loadContent, type Content } from '../../src/service/content.ts';
 import { noneInterpreter } from '../../src/service/interpret.ts';
 import { SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING } from '../fixtures/demo-sources.ts';
-import { cmd, content, ROOT, vocab } from '../helpers.ts';
+import { cmd, content, ROOT, vocab, newKv, newWs } from '../helpers.ts';
 
 // the correction round is about mechanics, not content: run it where batch 1's reviewed plans don't decide the sugar and
 // baking powder (harness choice, 2026-10-08), so those uses still go through the round
@@ -31,21 +32,21 @@ const scripted = (raw: unknown): Extractor => ({ name: 'SCRIPTED', extract: asyn
 
 /** Import pasted lines with a scripted reading and scripted cards (+ an optional scripted correction round) on a fresh database. */
 async function imp(c: Content, lines: readonly string[], reading: unknown, cards: unknown = { cards: [] }, repair?: (message: string) => unknown) {
-  const svc = new Service({ dbPath: join(mkdtempSync(join(tmpdir(), 'ccmcp-policy-')), 'db'), content: c, interpreter: noneInterpreter, fixtureRecipes: false });
+  const svc = new Service({ kv: newKv(join(mkdtempSync(join(tmpdir(), 'ccmcp-policy-')), 'db')), ws: newWs(), content: c, interpreter: noneInterpreter, fixtureRecipes: false });
   const calls = { analyze: 0, repair: 0, messages: [] as string[] };
   const analyzer: SwapAnalyzer = {
     name: 'SCRIPTED', analyze: async () => { calls.analyze++; return { ok: true, raw: cards, analyzer: 'SCRIPTED', usage: null, costUsd: 0 }; },
     ...(repair ? { repair: async (m: string) => { calls.repair++; calls.messages.push(m); const raw = repair(m); return raw === null ? { ok: false as const, error: 'TIMEOUT', detail: 'scripted', analyzer: 'SCRIPTED', usage: null, costUsd: 0 } : { ok: true as const, raw, analyzer: 'SCRIPTED', usage: null, costUsd: 0 }; } } : {}),
   };
-  const auth = new Authoring({ store: svc.store, content: c, extractor: scripted(reading), analyzer });
-  svc.catalog = () => auth.catalog();
+  const auth = new Authoring({ kv: svc.kv, ws: svc.ws, content: c, extractor: scripted(reading), analyzer });
+  svc.catalog = (t) => auth.catalogIn(t);
   const r = await auth.createImport({ kind: 'text', text: lines.join('\n') });
   if (r.status !== 202) throw new Error(JSON.stringify(r));
   const job = await auth.waitForJob(r.job.id);
   if (job.state === 'failed') throw new Error(JSON.stringify(job.failure));
-  const uses = () => { const x = auth.getDraft(r.draftId).draft.content!; return x.ingredients.flatMap((i) => i.uses.map((u) => ({ name: i.name, step: x.steps.find((s) => s.id === u.stepId)!.ordinal, ...u }))); };
-  const use = (name: string, step: number) => uses().find((u) => u.name === name && u.step === step)!;
-  return { svc, auth, draftId: r.draftId, calls, uses, use, pack: () => auth.coverageOf(r.draftId).pack! };
+  const uses = async () => { const x = (await auth.getDraft(r.draftId)).draft.content!; return x.ingredients.flatMap((i) => i.uses.map((u) => ({ name: i.name, step: x.steps.find((s) => s.id === u.stepId)!.ordinal, ...u }))); };
+  const use = async (name: string, step: number) => (await uses()).find((u) => u.name === name && u.step === step)!;
+  return { svc, auth, draftId: r.draftId, calls, uses, use, pack: async () => (await auth.coverageOf(r.draftId)).pack! };
 }
 /** A variant of the explicit scone fixture: swap a line (and the reading's matching texts) without touching anything else. */
 function variant(edit: { line?: [string, string]; ingredient?: { key: string; name: string; line: string; amountText: string; kind: string | null }; step?: [string, string]; addUse?: Reading['uses'][number] }) {
@@ -97,25 +98,25 @@ describe('ingredient identity is separate from substitution', () => {
       card('U1', 'all-purpose flour', null, 'Whisk 300 g all-purpose flour, sugar, baking powder and salt.'),
       { ...card('U2', 'granulated sugar', 'white-sugar', 'Whisk the flour, 40 g granulated sugar, baking powder and salt.'), functions: ['SWEETNESS'], swap: { ingredient: 'granulated sugar', kindId: 'white-sugar', amountText: '40 g', otherIngredients: [] } },
     ] });
-    const cards = x.pack().cards!;
+    const cards = (await x.pack()).cards!;
     expect(cards[0].reason).toBe('SWAP_IS_SAME_INGREDIENT: all-purpose flour resolves to plain flour');
     // granulated is a different form of sugar from caster: a real swap (not SWAP_IS_SAME_INGREDIENT); batch 1's reviewed
     // plan for the same swap supersedes the card, which agrees
     expect(cards[1]).toMatchObject({ status: 'SUPERSEDED', reason: expect.stringMatching(/Granulated sugar for caster sugar in a dry mix.*\(agrees\)/) });
-    expect(x.use('caster sugar', 2).analysis!.plans[0]).toMatchObject({ ruleId: 'caster_to_granulated@1' });
+    expect((await x.use('caster sugar', 2)).analysis!.plans[0]).toMatchObject({ ruleId: 'caster_to_granulated@1' });
   });
 });
 
 describe('approved policies bind by facts, not by recipe', () => {
   it('the explicit scone: sugar and baking powder get reviewed-policy plans with sourced amounts', async () => {
     const x = await imp(content, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING);
-    const sugar = planOf(x.use('caster sugar', 2)), bp = planOf(x.use('baking powder', 2));
+    const sugar = planOf(await x.use('caster sugar', 2)), bp = planOf(await x.use('baking powder', 2));
     expect(sugar).toMatchObject({ ruleId: 'caster_to_granulated@1', kind: 'replacement' });
     expect(sugar.replacements.map((r) => [r.ingredientName, r.amount.display])).toEqual([['Granulated sugar', '40 g']]);
     expect(bp).toMatchObject({ ruleId: 'powder_from_soda_and_tartar@1' });
     expect(bp.replacements.map((r) => [r.ingredientName, r.amount.display])).toEqual([['Baking soda', '¾ tsp'], ['Cream of tartar', '1½ tsp']]);
     expect(bp.stepEffects[0].after!.map((s) => s.text).join('')).toMatch(/shape it and bake it straight away, without resting or chilling it\.$/);
-    expect(x.use('salt', 2).analysis!.plans.every((p) => p.ruleId === null)).toBe(true);   // the salt omission is deferred: no reviewed plan
+    expect((await x.use('salt', 2)).analysis!.plans.every((p) => p.ruleId === null)).toBe(true);   // the salt omission is deferred: no reviewed plan
   });
 
   it('the same facts in a different recipe bind the same policies, with that recipe\'s amounts', async () => {
@@ -129,49 +130,50 @@ describe('approved policies bind by facts, not by recipe', () => {
         { key: 's3', text: 'Drop onto a tray and bake for 12 minutes.', title: 'Bake', technique: 'BAKE' }],
       uses: [use('f', 's1', 'the flour', ['STRUCTURE']), use('s', 's1', 'sugar', ['SWEETNESS']), use('b', 's1', 'baking powder', ['LEAVENING']), use('t', 's1', 'salt', ['FLAVOR']), use('m', 's2', 'the milk', ['LIQUID'])] };
     const x = await imp(content, lines, reading);
-    expect(planOf(x.use('caster sugar', 1)).replacements.map((r) => r.amount.display)).toEqual(['20 g']);
+    expect(planOf(await x.use('caster sugar', 1)).replacements.map((r) => r.amount.display)).toEqual(['20 g']);
     // no oven-heating step: soda + cream of tartar has to go straight into a hot oven, so it isn't offered here (B8)
-    expect(x.pack().coverage.find((e) => e.patternId === 'powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'SLOT_NONE:preheat' } });
+    expect((await x.pack()).coverage.find((e) => e.patternId === 'powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'SLOT_NONE:preheat' } });
     // the same biscuits with the oven heated first: the same policy binds with this recipe's amounts
     const hot = await imp(content, [...lines.slice(0, 7), '1. Heat the oven to 220 °C.', ...lines.slice(7).map((l) => l.replace(/^(\d)\./, (_m, n) => `${Number(n) + 1}.`))],
       { ...reading, steps: [{ key: 's0', text: 'Heat the oven to 220 °C.', title: 'Heat oven', technique: 'PREHEAT' }, ...reading.steps] });
-    expect(planOf(hot.use('baking powder', 2)).replacements.map((r) => r.amount.display)).toEqual(['½ tsp', '1 tsp']);   // 2 tsp × ¼ and × ½
+    expect(planOf(await hot.use('baking powder', 2)).replacements.map((r) => r.amount.display)).toEqual(['½ tsp', '1 tsp']);   // 2 tsp × ¼ and × ½
   });
 
   it('changing the form, the technique or the amount changes applicability', async () => {
     // form: granulated sugar is not caster sugar, so the caster rule has no target
     const form = variant({ line: ['40 g caster sugar', '40 g granulated sugar'], ingredient: { key: 'sugar', name: 'granulated sugar', line: '40 g granulated sugar', amountText: '40 g', kind: 'white-sugar' } });
     const a = await imp(content, form.lines, form.reading);
-    expect(a.pack().coverage.find((e) => e.patternId === 'caster_to_granulated')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'NO_TARGET' } });
+    expect((await a.pack()).coverage.find((e) => e.patternId === 'caster_to_granulated')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'NO_TARGET' } });
     // technique: "Mix" carries no approved cue for combining dry ingredients, so nothing confirms step 2 and nothing is inferred
     const tech = variant({ step: ['Whisk the flour, sugar, baking powder and salt.', 'Mix the flour, sugar, baking powder and salt.'] });
     const b = await imp(content, tech.lines, tech.reading);
-    expect(b.use('caster sugar', 2).analysis).toMatchObject({ status: 'blocked', reason: { code: 'missingFact' } });
-    expect(b.use('caster sugar', 2).analysis!.reason!.text).toMatch(/how step 2 is done/);
+    expect((await b.use('caster sugar', 2)).analysis).toMatchObject({ status: 'blocked', reason: { code: 'missingFact' } });
+    expect((await b.use('caster sugar', 2)).analysis!.reason!.text).toMatch(/how step 2 is done/);
     // amount: by volume isn't the sourced weight basis; 3 tbsp baking powder is outside the policy's bounds
     const vol = variant({ line: ['40 g caster sugar', '3 tbsp caster sugar'], ingredient: { key: 'sugar', name: 'caster sugar', line: '3 tbsp caster sugar', amountText: '3 tbsp', kind: null } });
-    expect((await imp(content, vol.lines, vol.reading)).use('caster sugar', 2).analysis!.status).not.toBe('available');
+    expect((await (await imp(content, vol.lines, vol.reading)).use('caster sugar', 2)).analysis!.status).not.toBe('available');
     const big = variant({ line: ['1 tbsp baking powder', '3 tbsp baking powder'], ingredient: { key: 'bp', name: 'baking powder', line: '3 tbsp baking powder', amountText: '3 tbsp', kind: 'baking-powder' } });
-    expect((await imp(content, big.lines, big.reading)).pack().coverage.find((e) => e.patternId === 'powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'QUANTITY_INPUT_OUT_OF_DOMAIN' } });
+    expect((await (await imp(content, big.lines, big.reading)).pack()).coverage.find((e) => e.patternId === 'powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'QUANTITY_INPUT_OUT_OF_DOMAIN' } });
   });
 
   it('every use of the missing ingredient is accounted for: an unhandled second use stops a total-based plan; one plan covering two uses is one plan', async () => {
     const two = variant({ step: ['Brush the tops with 15 ML heavy cream.', 'Brush the tops with 15 ML heavy cream and sprinkle with caster sugar.'], addUse: { ingredientKey: 'sugar', stepKey: 's6', quote: 'caster sugar', amountText: null, functions: ['SWEETNESS'] } });
     const a = await imp(content, two.lines, two.reading);
-    expect(a.pack().coverage.find((e) => e.patternId === 'caster_to_granulated' && e.status !== 'NOT_APPLICABLE' || e.failedCheck?.code === 'TOTAL_BASE_REQUIRES_ALL_USES_COVERED')).toMatchObject({ failedCheck: { code: 'TOTAL_BASE_REQUIRES_ALL_USES_COVERED' } });
-    expect(a.use('caster sugar', 2).analysis!.status).not.toBe('available');
+    expect((await a.pack()).coverage.find((e) => e.patternId === 'caster_to_granulated' && e.status !== 'NOT_APPLICABLE' || e.failedCheck?.code === 'TOTAL_BASE_REQUIRES_ALL_USES_COVERED')).toMatchObject({ failedCheck: { code: 'TOTAL_BASE_REQUIRES_ALL_USES_COVERED' } });
+    expect((await a.use('caster sugar', 2)).analysis!.status).not.toBe('available');
     const x = await imp(content, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING);
-    const dough = x.use('heavy cream', 3), brush = x.use('heavy cream', 6);
+    const dough = await x.use('heavy cream', 3), brush = await x.use('heavy cream', 6);
     expect(brush.analysis!.coveredByUseId).toBe(dough.id);
     expect(new Set([planOf(dough), planOf(brush)].map((p) => p.planId)).size).toBe(1);   // two cells, one plan
   });
 
   it('a failed AI card does not suppress a valid policy plan', async () => {
     const bad = { useRef: 'U2', role: 'sweetens', functions: ['SWEETNESS'], verdict: 'swap', swap: { ingredient: 'granulated sugar', kindId: 'white-sugar', amountText: '40 g', otherIngredients: [] },
-      stepRewrites: [{ stepRef: 'S2', text: 'Whisk the flour, granulated sugar, baking powder and salt.' }], siblings: [], tradeoff: 'A little coarser.', opinion: 'Use granulated sugar.' };
+      stepRewrites: [{ stepRef: 'S2', text: 'Whisk the flour, the sweetener, baking powder and salt.' }], siblings: [], tradeoff: 'A little coarser.', opinion: 'Use granulated sugar.' };
     const x = await imp(content, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING, { cards: [bad] }, () => ({ cards: [] }));
-    expect(x.pack().cards!.find((e) => e.useId === x.use('caster sugar', 2).id)).toMatchObject({ status: 'INVALID', reason: "REWRITE_MISSING_AMOUNT: step 2 doesn't say 40 g granulated sugar" });
-    expect(x.use('caster sugar', 2).analysis).toMatchObject({ status: 'available', plans: [{ ruleId: 'caster_to_granulated@1' }] });
+    const xSugar = (await x.use('caster sugar', 2)).id;
+    expect((await x.pack()).cards!.find((e) => e.useId === xSugar)).toMatchObject({ status: 'INVALID', reason: "REWRITE_MISSING_AMOUNT: step 2 doesn't say 40 g granulated sugar" });
+    expect((await x.use('caster sugar', 2)).analysis).toMatchObject({ status: 'available', plans: [{ ruleId: 'caster_to_granulated@1' }] });
     expect(x.calls.repair).toBe(1);
     expect(x.calls.messages[0]).not.toContain('U2: rejected');   // reviewed content decides the sugar: it is not sent for correction
   });
@@ -179,10 +181,11 @@ describe('approved policies bind by facts, not by recipe', () => {
   it('an AI omission of the leavening: passed every structural check before batch 1; B2 now refuses it (and only it)', async () => {
     const omitBp = { useRef: 'U3', role: 'raises', functions: ['LEAVENING'], verdict: 'omit', swap: null, stepRewrites: [{ stepRef: 'S2', text: 'Whisk the flour, sugar and salt.' }], siblings: [],
       tradeoff: 'They will be denser.', opinion: 'Leave the baking powder out of step 2.' };
-    expect((await imp(preBatch, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING, { cards: [omitBp] })).use('baking powder', 2).analysis).toMatchObject({ status: 'available', offer: 'omission' });   // the gap (cards2 shortcake)
+    expect((await (await imp(preBatch, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING, { cards: [omitBp] })).use('baking powder', 2)).analysis).toMatchObject({ status: 'available', offer: 'omission' });   // the gap (cards2 shortcake)
     const big = variant({ line: ['1 tbsp baking powder', '3 tbsp baking powder'], ingredient: { key: 'bp', name: 'baking powder', line: '3 tbsp baking powder', amountText: '3 tbsp', kind: 'baking-powder' } });
     const x = await imp(content, big.lines, big.reading, { cards: [{ ...omitBp }] });
-    expect(x.pack().cards!.find((e) => e.useId === x.use('baking powder', 2).id)!.reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Leaving out the leavening" refuses leaving it out/);
+    const xBp = (await x.use('baking powder', 2)).id;
+    expect((await x.pack()).cards!.find((e) => e.useId === xBp)!.reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Leaving out the leavening" refuses leaving it out/);
   });
 });
 
@@ -191,7 +194,7 @@ describe('one bounded correction round', () => {
     swap: { ingredient, kindId, amountText, otherIngredients: [] }, stepRewrites: [{ stepRef: 'S2', text }], siblings: [], tradeoff: 'It will differ.', opinion: 'Use it in step 2.' });
   const first = { cards: [
     card('U1', 'all-purpose flour', 'plain-flour', '300 g', 'Whisk 300 g all-purpose flour, sugar, baking powder and salt.', ['STRUCTURE']),   // same ingredient
-    card('U2', 'granulated sugar', 'white-sugar', '40 g', 'Whisk the flour, granulated sugar, baking powder and salt.', ['SWEETNESS']),         // amount missing
+    card('U2', 'granulated sugar', 'white-sugar', '40 g', 'Whisk the flour, the sweetener, baking powder and salt.', ['SWEETNESS']),           // replacement never named
     card('U3', 'baking soda', 'baking-powder', '1 tsp', 'Whisk the flour, sugar, 1 tsp baking soda and salt.', ['LEAVENING']),                // mislabelled
     { useRef: 'U4', role: 'seasons', functions: ['FLAVOR'], verdict: 'omit', swap: null, stepRewrites: [{ stepRef: 'S2', text: 'Whisk the flour, sugar and baking powder.' }], siblings: [], tradeoff: 'Flatter.', opinion: 'Leave the salt out of step 2.' },
   ] };                                                                                                                                        // U5, U6 (cream): no card; the reviewed rule decides them
@@ -206,44 +209,55 @@ describe('one bounded correction round', () => {
     expect(x.calls).toMatchObject({ analyze: 1, repair: 1 });
     const m = x.calls.messages[0];
     expect(m).toContain('U1: rejected because SWAP_IS_SAME_INGREDIENT: all-purpose flour resolves to plain flour');
-    expect(m).toContain("U2: rejected because REWRITE_MISSING_AMOUNT: step 2 doesn't say 40 g granulated sugar");
+    expect(m).toContain("U2: rejected because REWRITE_MISSING_AMOUNT: step 2 doesn't say 40 g granulated sugar\n  to fix: In the new text of step 2, write \"40 g granulated sugar\" exactly");
+    expect(m).toContain('to fix: "baking soda" is not baking powder: set its kindId to "unlisted"');
     expect(m).toContain('U3: rejected because KIND_MISMATCH: "baking soda" isn\'t baking powder');
     expect(m).toContain('siblings it may list: none; steps it may rewrite: S2');
     expect(m).not.toMatch(/^U[456]: rejected/m);                        // valid, or decided by the reviewed cream rule
     expect(m).toContain('baking-soda: baking soda / bicarbonate of soda');   // the allowed identities
-    expect(x.use('plain flour', 2).analysis).toMatchObject({ status: 'evaluatedNoOption', reason: { code: 'aiSaysNo' } });
-    expect(x.use('caster sugar', 2).analysis).toMatchObject({ status: 'available', plans: [{ ruleId: null }] });
-    expect(x.use('caster sugar', 2).analysis!.plans[0].provenance.basis).toContain('Corrected once at import: the first draft was rejected by these checks, and this corrected draft passed the same checks. The correction is not a culinary review.');
-    const bp = x.use('baking powder', 2).analysis!;
+    expect((await x.use('plain flour', 2)).analysis).toMatchObject({ status: 'evaluatedNoOption', reason: { code: 'aiSaysNo' } });
+    expect((await x.use('caster sugar', 2)).analysis).toMatchObject({ status: 'available', plans: [{ ruleId: null }] });
+    expect((await x.use('caster sugar', 2)).analysis!.plans[0].provenance.basis).toContain('Corrected once at import: the first draft was rejected by these checks, and this corrected draft passed the same checks. The correction is not a culinary review.');
+    const bp = (await x.use('baking powder', 2)).analysis!;
     expect(bp).toMatchObject({ status: 'failed', reason: { code: 'validationFailed' } });
     expect(bp.reason!.text).toContain('even after one automatic correction');
     expect(bp.reason!.text).toContain('That isn’t a finding that the baking powder can’t be replaced');
     expect(bp.reason!.detail).toMatch(/^import card: REWRITE_UNKNOWN_STEP: S9; correction round: STILL_INVALID, first draft rejected as KIND_MISMATCH/);
     // both attempts kept apart; the first round's cards are unchanged
-    const a = x.svc.store.get<{ raw_json: string }>('SELECT raw_json FROM swap_analyses')!, r = x.svc.store.get<{ raw_json: string; status: string; requested_json: string }>('SELECT * FROM swap_repairs')!;
-    expect(JSON.parse(a.raw_json)).toEqual(first);
+    const [a] = await x.svc.kv.query(wsPk(x.svc.ws), { prefix: `DR#${x.draftId}#SA#` }), r = (await x.svc.kv.get({ pk: wsPk(x.svc.ws), sk: `SR#${a.analysisId as string}` }))!;
+    expect(a.raw).toEqual(first);
     expect(r).toMatchObject({ status: 'SUCCEEDED' });
-    expect(JSON.parse(r.raw_json)).toEqual(second);
-    expect((JSON.parse(r.requested_json) as { useRef: string }[]).map((q) => q.useRef)).toEqual(['U1', 'U2', 'U3']);
+    expect(r.raw).toEqual(second);
+    expect((r.requested as { useRef: string }[]).map((q) => q.useRef)).toEqual(['U1', 'U2', 'U3']);
   });
 
   it('save and reopen keep the analysis without any new call; the saved recipe cooks its prepared plan', async () => {
     const x = await imp(preBatch, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING, first, () => second);
-    const before = x.uses().map((u) => [u.id, u.analysis!.status, u.analysis!.plans.map((p) => p.planId)]);
-    const saved = x.auth.save(x.draftId, { expectedRevision: x.auth.revision(x.draftId) });
-    const page = x.auth.getRecipe(saved.recipeId).version.content!;
+    const before = (await x.uses()).map((u) => [u.id, u.analysis!.status, u.analysis!.plans.map((p) => p.planId)]);
+    const saved = await x.auth.save(x.draftId, { expectedRevision: await x.auth.revision(x.draftId) });
+    const page = (await x.auth.getRecipe(saved.recipeId)).version.content!;
     expect(page.ingredients.flatMap((i) => i.uses).map((u) => [u.id, u.analysis!.status, u.analysis!.plans.map((p) => p.planId)])).toEqual(before);
-    x.uses(); x.uses();
+    await x.uses(); await x.uses();
     expect(x.calls).toMatchObject({ analyze: 1, repair: 1 });          // never a second round, never a regeneration
   });
 
   it('a failed correction call leaves the uses failed (technical), never "no option"; a correction that omits a card is NOT_RETURNED', async () => {
     const down = await imp(preBatch, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING, first, () => null);
-    expect(down.use('caster sugar', 2).analysis).toMatchObject({ status: 'failed', reason: { code: 'validationFailed' } });
-    expect(down.use('caster sugar', 2).analysis!.reason!.detail).toMatch(/correction round: NOT_RUN \(FAILED_CALL:TIMEOUT\)$/);
+    expect((await down.use('caster sugar', 2)).analysis).toMatchObject({ status: 'failed', reason: { code: 'validationFailed' } });
+    expect((await down.use('caster sugar', 2)).analysis!.reason!.detail).toMatch(/correction round: NOT_RUN \(FAILED_CALL:TIMEOUT\)$/);
     const partial = await imp(preBatch, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING, first, () => ({ cards: [second.cards[1]] }));
-    expect(partial.use('caster sugar', 2).analysis!.status).toBe('available');
-    expect(partial.use('plain flour', 2).analysis!.reason!.detail).toMatch(/correction round: NOT_RETURNED$/);
+    expect((await partial.use('caster sugar', 2)).analysis!.status).toBe('available');
+    expect((await partial.use('plain flour', 2)).analysis!.reason!.detail).toMatch(/correction round: NOT_RETURNED$/);
+  });
+
+  it('B6: a rewrite that names the replacement without its amount compiles, with the amount stated by code from the card', async () => {
+    const x = await imp(preBatch, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING, { cards: [card('U2', 'granulated sugar', 'white-sugar', '40 g', 'Whisk the flour, the granulated sugar, baking powder and salt.', ['SWEETNESS'])] });
+    const sugar = (await x.use('caster sugar', 2)).id;
+    expect((await x.pack()).cards!.find((e) => e.useId === sugar)).toMatchObject({ status: 'COMPILED' });
+    const b = (await x.pack()).bindings.find((y) => y.card && y.targetUseId === sugar)!;
+    const step = b.ops.find((o) => o.op === 'REPLACE_STEP_TEXT') as { text: string }, use = b.ops.find((o) => o.op === 'REPLACE_USE') as { newUse: { useId: string; displayText: string } };
+    expect(step.text).toMatch(new RegExp(`^Whisk \\{use:[^}]+\\}, \\{use:${use.newUse.useId}\\}, \\{use:[^}]+\\} and \\{use:[^}]+\\}\\.$`));   // "the granulated sugar" became the use
+    expect(use.newUse.displayText).toBe('40 g granulated sugar');                                   // its words: the card's amount, never the rewrite's
   });
 
   it('authority decisions are never sent for correction', () => {
@@ -256,16 +270,16 @@ describe('one bounded correction round', () => {
 describe('cooking the imported recipe uses its prepared policy plan', () => {
   it('caster sugar → granulated at step 2; baking soda alone is refused while soda + cream of tartar is offered', async () => {
     const x = await imp(content, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING);
-    const planId = planOf(x.use('caster sugar', 2)).planId;
-    const saved = x.auth.save(x.draftId, { expectedRevision: x.auth.revision(x.draftId) });
-    const st = x.svc.startRecipe({ commandId: cmd(), recipeId: saved.recipeId, recipeVersionId: saved.recipeVersionId });
+    const planId = planOf(await x.use('caster sugar', 2)).planId;
+    const saved = await x.auth.save(x.draftId, { expectedRevision: await x.auth.revision(x.draftId) });
+    const st = await x.svc.startRecipe({ commandId: cmd(), recipeId: saved.recipeId, recipeVersionId: saved.recipeVersionId });
     if (st.outcome !== 'started') throw new Error(JSON.stringify(st));
     let run = st.run;
-    const step1 = x.svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: st.recipe.steps[0].id, progress: 'done' });
+    const step1 = await x.svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: st.recipe.steps[0].id, progress: 'done' });
     if (step1.outcome !== 'recorded') throw new Error(step1.code);
     run = step1.run;
     const id = (n: string) => st.recipe.ingredients.find((i) => i.name === n)!.id;
-    const ask = async (missing: string, kinds: string[], prev?: { id: string; questions: { id: string }[] }) => x.svc.evaluateRescue({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision,
+    const ask = async (missing: string, kinds: string[], prev?: { id: string; questions: { id: string }[] }) => await x.svc.evaluateRescue({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision,
       missingIngredientId: id(missing), proposedKindIds: kinds, utterance: { text: 'tapped', channel: 'tapped' }, ...(prev ? { previousEvaluationId: prev.id, answers: prev.questions.map((q) => ({ questionId: q.id, value: 'yes' as const })) } : {}) });
     const soda = await ask('baking powder', ['baking-soda']);
     // the reviewed refusal answers the proposal; the reviewed soda + cream of tartar plan is offered instead
@@ -279,20 +293,20 @@ describe('cooking the imported recipe uses its prepared policy plan', () => {
     expect(e1.previews[0].id).toBe(planId);                              // the import's plan is the cooking candidate
     const e2 = await ask('caster sugar', ['white-sugar'], e1);
     if (e2.outcome !== 'proposal') throw new Error(e2.outcome);
-    const cur = x.svc.getActiveRecipe().run!;
-    const ap = x.svc.applyAmendment({ commandId: cmd(), runId: cur.id, epoch: cur.epoch, expectedRevision: cur.revision, evaluationId: e2.id, candidateId: e2.candidates[0].id, planId: e2.candidates[0].planId, accepted: true });
+    const cur = (await x.svc.getActiveRecipe()).run!;
+    const ap = await x.svc.applyAmendment({ commandId: cmd(), runId: cur.id, epoch: cur.epoch, expectedRevision: cur.revision, evaluationId: e2.id, candidateId: e2.candidates[0].id, planId: e2.candidates[0].planId, accepted: true });
     if (ap.outcome !== 'applied') throw new Error(ap.outcome);
     expect(ap.run.steps[1]).toMatchObject({ effectiveText: 'Whisk the flour, 40 g granulated sugar, baking powder and salt.', progress: 'notStarted' });
   });
 
   it('progress changes applicability: once step 2 has started, the sugar plan protects the started work', async () => {
     const x = await imp(content, SCONE_EXPLICIT_LINES, SCONE_EXPLICIT_READING);
-    const saved = x.auth.save(x.draftId, { expectedRevision: x.auth.revision(x.draftId) });
-    const st = x.svc.startRecipe({ commandId: cmd(), recipeId: saved.recipeId, recipeVersionId: saved.recipeVersionId });
+    const saved = await x.auth.save(x.draftId, { expectedRevision: await x.auth.revision(x.draftId) });
+    const st = await x.svc.startRecipe({ commandId: cmd(), recipeId: saved.recipeId, recipeVersionId: saved.recipeVersionId });
     if (st.outcome !== 'started') throw new Error(JSON.stringify(st));
     let run = st.run;
     for (const [s, p] of [[0, 'done'], [1, 'started']] as const) {
-      const r = x.svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: st.recipe.steps[s].id, progress: p });
+      const r = await x.svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: st.recipe.steps[s].id, progress: p });
       if (r.outcome !== 'recorded') throw new Error(r.code); run = r.run;
     }
     const ev = await x.svc.evaluateRescue({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, missingIngredientId: st.recipe.ingredients.find((i) => i.name === 'caster sugar')!.id, proposedKindIds: ['white-sugar'], utterance: { text: 'tapped', channel: 'tapped' } });

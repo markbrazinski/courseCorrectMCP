@@ -16,35 +16,35 @@ import { Service } from '../../src/service/commands.ts';
 import { noneInterpreter } from '../../src/service/interpret.ts';
 import { SHORTCAKE_LINES, SHORTCAKE_READING } from '../fixtures/demo-sources.ts';
 import { RECIPE } from '../fixtures/ids.ts';
-import { cmd, content, doneUpTo, pack, patterns, req, snapshotAfter, vocab } from '../helpers.ts';
+import { cmd, content, doneUpTo, pack, patterns, req, snapshotAfter, vocab, newKv, newWs } from '../helpers.ts';
 
 const scripted = (raw: unknown): Extractor => ({ name: 'SCRIPTED', extract: async () => ({ ok: true, raw, extractor: 'SCRIPTED', usage: null, costUsd: 0 }) });
 async function imp(lines: readonly string[], reading: unknown, cards: unknown = { cards: [] }) {
-  const svc = new Service({ dbPath: join(mkdtempSync(join(tmpdir(), 'ccmcp-batch1-')), 'db'), content, interpreter: noneInterpreter, fixtureRecipes: false });
+  const svc = new Service({ kv: newKv(join(mkdtempSync(join(tmpdir(), 'ccmcp-batch1-')), 'db')), ws: newWs(), content, interpreter: noneInterpreter, fixtureRecipes: false });
   const analyzer: SwapAnalyzer = { name: 'SCRIPTED', analyze: async () => ({ ok: true, raw: cards, analyzer: 'SCRIPTED', usage: null, costUsd: 0 }) };
-  const auth = new Authoring({ store: svc.store, content, extractor: scripted(reading), analyzer });
-  svc.catalog = () => auth.catalog();
+  const auth = new Authoring({ kv: svc.kv, ws: svc.ws, content, extractor: scripted(reading), analyzer });
+  svc.catalog = (t) => auth.catalogIn(t);
   const r = await auth.createImport({ kind: 'text', text: lines.join('\n') });
   if (r.status !== 202) throw new Error(JSON.stringify(r));
   const job = await auth.waitForJob(r.job.id);
   if (job.state === 'failed') throw new Error(JSON.stringify(job.failure));
-  const uses = () => { const x = auth.getDraft(r.draftId).draft.content!; return x.ingredients.flatMap((i) => i.uses.map((u) => ({ name: i.name, step: x.steps.find((s) => s.id === u.stepId)!.ordinal, ...u }))); };
-  const use = (name: string, step: number) => uses().find((u) => u.name === name && u.step === step)!;
-  const pk = () => auth.coverageOf(r.draftId).pack!;
-  const cover = (patternId: string) => pk().coverage.find((e) => e.patternId === patternId);
+  const uses = async () => { const x = (await auth.getDraft(r.draftId)).draft.content!; return x.ingredients.flatMap((i) => i.uses.map((u) => ({ name: i.name, step: x.steps.find((s) => s.id === u.stepId)!.ordinal, ...u }))); };
+  const use = async (name: string, step: number) => (await uses()).find((u) => u.name === name && u.step === step)!;
+  const pk = async () => (await auth.coverageOf(r.draftId)).pack!;
+  const cover = async (patternId: string) => (await pk()).coverage.find((e) => e.patternId === patternId);
   /** save, start, mark the first `done` steps done (product path), and an `ask` bound to the run */
   const cook = async (done: number) => {
-    const saved = auth.save(r.draftId, { expectedRevision: auth.revision(r.draftId) });
-    const st = svc.startRecipe({ commandId: cmd(), recipeId: saved.recipeId, recipeVersionId: saved.recipeVersionId });
+    const saved = await auth.save(r.draftId, { expectedRevision: await auth.revision(r.draftId) });
+    const st = await svc.startRecipe({ commandId: cmd(), recipeId: saved.recipeId, recipeVersionId: saved.recipeVersionId });
     if (st.outcome !== 'started') throw new Error(JSON.stringify(st));
     let run = st.run;
-    const progress = (i: number, p: 'done' | 'started') => { const x = svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: st.recipe.steps[i].id, progress: p }); if (x.outcome !== 'recorded') throw new Error(x.code); run = x.run; };
-    for (let i = 0; i < done; i++) progress(i, 'done');
+    const progress = async (i: number, p: 'done' | 'started') => { const x = await svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: st.recipe.steps[i].id, progress: p }); if (x.outcome !== 'recorded') throw new Error(x.code); run = x.run; };
+    for (let i = 0; i < done; i++) await progress(i, 'done');
     const id = (n: string) => st.recipe.ingredients.find((i) => i.name === n)!.id;
-    const ask = (missing: string, kinds: string[] = [], prev?: { id: string; questions: { id: string }[] }) => { const cur = svc.getActiveRecipe().run!; return svc.evaluateRescue({ commandId: cmd(), runId: cur.id, epoch: cur.epoch, expectedRevision: cur.revision,
+    const ask = async (missing: string, kinds: string[] = [], prev?: { id: string; questions: { id: string }[] }) => { const cur = (await svc.getActiveRecipe()).run!; return await svc.evaluateRescue({ commandId: cmd(), runId: cur.id, epoch: cur.epoch, expectedRevision: cur.revision,
       missingIngredientId: id(missing), proposedKindIds: kinds, utterance: { text: 'tapped', channel: 'tapped' }, ...(prev ? { previousEvaluationId: prev.id, answers: prev.questions.map((q) => ({ questionId: q.id, value: 'yes' as const })) } : {}) }); };
-    const applyArgs = (e: { id: string; candidates: { id: string; planId: string }[] }) => { const cur = svc.getActiveRecipe().run!; return { commandId: cmd(), runId: cur.id, epoch: cur.epoch, expectedRevision: cur.revision, evaluationId: e.id, candidateId: e.candidates[0].id, planId: e.candidates[0].planId, accepted: true as const }; };
-    const apply = (e: { id: string; candidates: { id: string; planId: string }[] }) => svc.applyAmendment(applyArgs(e));
+    const applyArgs = async (e: { id: string; candidates: { id: string; planId: string }[] }) => { const cur = (await svc.getActiveRecipe()).run!; return { commandId: cmd(), runId: cur.id, epoch: cur.epoch, expectedRevision: cur.revision, evaluationId: e.id, candidateId: e.candidates[0].id, planId: e.candidates[0].planId, accepted: true as const }; };
+    const apply = async (e: { id: string; candidates: { id: string; planId: string }[] }) => await svc.applyAmendment(await applyArgs(e));
     return { st, ask, apply, applyArgs, progress, run: () => run };
   };
   return { svc, auth, uses, use, pack: pk, cover, cook };
@@ -89,8 +89,8 @@ describe('identity: aliases versus distinct forms (vocabulary v3)', () => {
 describe('B7 evaporated milk + water (positive, coordinated; G6)', () => {
   it('E-03: the plan shows both ingredients, amounts and the mixing, from the server; the cooking candidate is the import plan; apply rewrites once and completes nothing', async () => {
     const x = await imp(drop().lines, drop().reading);
-    const p = plan(x.use('milk', 3));
-    expect(p).toMatchObject({ ruleId: 'evaporated_milk_for_milk@1', kind: 'replacement', provenance: { kind: 'reviewedRule' } });
+    const p = plan(await x.use('milk', 3));
+    expect(p).toMatchObject({ ruleId: 'evaporated_milk_for_milk@2', kind: 'replacement', provenance: { kind: 'reviewedRule' } });   // OD-8: v2 supersedes v1 in releases from 2026-10-11; on milk no change put in, its plan is v1's (successive.test)
     expect(p.replacements.map((r) => [r.ingredientName, r.amount.display])).toEqual([['Evaporated milk', '100 ML'], ['Water', '100 ML']]);
     expect(afterText(p)).toBe('Stir in 100 ML evaporated milk mixed with 100 ML water until a soft dough forms.');
     expect(p.runtimeConditions.filter((c) => c.kind === 'availability').map((c) => c.text)).toEqual(['100 ML evaporated milk', '100 ML water']);
@@ -102,46 +102,46 @@ describe('B7 evaporated milk + water (positive, coordinated; G6)', () => {
     expect(e1.previews[0].id).toBe(p.planId);
     const e2 = await k.ask('milk', ['evaporated-milk'], e1);
     if (e2.outcome !== 'proposal') throw new Error(e2.outcome);
-    const args = k.applyArgs(e2), ap = x.svc.applyAmendment(args);
+    const args = await k.applyArgs(e2), ap = await x.svc.applyAmendment(args);
     if (ap.outcome !== 'applied') throw new Error(ap.outcome);
     expect(ap.run.steps[2]).toMatchObject({ effectiveText: 'Stir in 100 ML evaporated milk mixed with 100 ML water until a soft dough forms.', progress: 'notStarted' });
-    expect(x.svc.applyAmendment(args)).toMatchObject({ outcome: 'alreadyApplied', amendment: { id: ap.amendment.id } });   // the same accepted command replays its receipt; nothing applies twice
-    expect(x.svc.getActiveRecipe().run!.appliedAmendments).toHaveLength(1);
+    expect(await x.svc.applyAmendment(args)).toMatchObject({ outcome: 'alreadyApplied', amendment: { id: ap.amendment.id } });   // the same accepted command replays its receipt; nothing applies twice
+    expect((await x.svc.getActiveRecipe()).run!.appliedAmendments).toHaveLength(1);
   });
 
   it('E-05: US cups convert exactly once; E-24: a second milk use leaves the listed-total plan unbound', async () => {
     const us = drop({ milk: '1 cup milk' });
     const a = await imp(us.lines, us.reading);
-    expect(plan(a.use('milk', 3)).replacements.map((r) => r.amount.display)).toEqual(['118 ML', '118 ML']);   // 236.588… × ½ → 118 (error ≤ ½)
+    expect(plan(await a.use('milk', 3)).replacements.map((r) => r.amount.display)).toEqual(['118 ML', '118 ML']);   // 236.588… × ½ → 118 (error ≤ ½)
     const two = drop({ extraSteps: [{ after: 's3', step: { key: 's4', text: 'Brush the tops with a little milk.', title: 'Brush', technique: 'BRUSH' } }], extraUses: [{ ingredientKey: 'm', stepKey: 's4', quote: 'a little milk', amountText: 'a little', functions: ['BROWNING'] }] });
     const b = await imp(two.lines, two.reading);
-    expect(b.cover('evaporated_milk_for_milk')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'TOTAL_BASE_REQUIRES_ALL_USES_COVERED' } });
+    expect(await b.cover('evaporated_milk_for_milk')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'TOTAL_BASE_REQUIRES_ALL_USES_COVERED' } });
   });
 });
 
 describe('B8 baking soda + cream of tartar (ATK selection; G1 conditions; timing note)', () => {
   it('E-04: binds with the oven heated first; the dry-mix step says to bake straight away; no preheat → not offered', async () => {
     const x = await imp(drop().lines, drop().reading);
-    const p = plan(x.use('baking powder', 2));
+    const p = plan(await x.use('baking powder', 2));
     expect(p).toMatchObject({ ruleId: 'powder_from_soda_and_tartar@1', contentStatus: { provisional: true } });
     expect(p.replacements.map((r) => [r.ingredientName, r.amount.display])).toEqual([['Baking soda', '½ tsp'], ['Cream of tartar', '1 tsp']]);
     expect(afterText(p)).toBe('Whisk the flour, sugar, ½ tsp baking soda, salt and 1 tsp cream of tartar. Have the oven hot before the liquid goes in: once the dough is wet, the baking soda and cream of tartar start working, so shape it and bake it straight away, without resting or chilling it.');
     const cold = drop({ preheat: false });
-    expect((await imp(cold.lines, cold.reading)).cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'SLOT_NONE:preheat' } });
+    expect((await (await imp(cold.lines, cold.reading)).cover('powder_from_soda_and_tartar'))).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'SLOT_NONE:preheat' } });
   });
 
   it('E-32: a recognized hold after mixing excludes it; an unrecognized step leaves it unknown (never proven absence)', async () => {
     const chill = drop({ extraSteps: [{ after: 's2', step: { key: 'sx', text: 'Cover and refrigerate the dough for 30 minutes.', title: 'Chill', technique: 'REST' } }] });
-    expect((await imp(chill.lines, chill.reading)).cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'APPLICABILITY' } });
+    expect((await (await imp(chill.lines, chill.reading)).cover('powder_from_soda_and_tartar'))).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'APPLICABILITY' } });
     // a hold worded in a step the reading tagged as something else is still caught by its words
     const hidden = drop({ extraSteps: [{ after: 's2', step: { key: 'sx', text: 'Place on the tray and chill for 20 minutes.', title: 'Tray', technique: 'TRAY' } }] });
-    expect((await imp(hidden.lines, hidden.reading)).cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'APPLICABILITY' } });
+    expect((await (await imp(hidden.lines, hidden.reading)).cover('powder_from_soda_and_tartar'))).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'APPLICABILITY' } });
     // a step CourseCorrect didn't recognize (no cue confirms it) could be a hold: unknown, so the plan waits, never binds
     const odd = drop({ extraSteps: [{ after: 's2', step: { key: 'sx', text: 'Drop spoonfuls onto the lined tray.', title: 'Portion', technique: 'TRAY' } }] });
     const y = await imp(odd.lines, odd.reading);
-    expect(y.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NEEDS_FACTS' });
-    expect(y.use('baking powder', 2).analysis).toMatchObject({ status: 'blocked', reason: { code: 'missingFact' } });
-    expect(y.use('baking powder', 2).analysis!.reason!.text).toMatch(/how step 4 is done/);
+    expect(await y.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NEEDS_FACTS' });
+    expect((await y.use('baking powder', 2)).analysis).toMatchObject({ status: 'blocked', reason: { code: 'missingFact' } });
+    expect((await y.use('baking powder', 2)).analysis!.reason!.text).toMatch(/how step 4 is done/);
   });
 });
 
@@ -150,43 +150,43 @@ describe('B8 source completeness (closure 2026-10-08): the whole method from the
   it('regression 1: the reading drops a source sentence requiring chilling → B8 never binds and nothing contradicts the source', async () => {
     const d = sourceWith(drop(), (l) => (l.startsWith('3. Stir in the milk') ? `${l} Chill the dough for 30 minutes.` : l));
     const x = await imp(d.lines, d.reading);
-    expect(x.pack().recipe.steps[3].source).toEqual({ located: true, gapBefore: 'chill the dough for 30 minutes' });   // what the reading left out
-    expect(x.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'APPLICABILITY' } });
-    const bp = x.use('baking powder', 2).analysis!;
+    expect((await x.pack()).recipe.steps[3].source).toEqual({ located: true, gapBefore: 'chill the dough for 30 minutes' });   // what the reading left out
+    expect(await x.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'APPLICABILITY' } });
+    const bp = (await x.use('baking powder', 2)).analysis!;
     expect(bp.plans.map((p) => p.ruleId)).not.toContain('powder_from_soda_and_tartar@1');
     expect(bp.reason!.text).toMatch(/the recipe rests or chills before baking, and the swap has to be baked straight away/);
     const k = await x.cook(1);
     const e = await k.ask('baking powder', ['baking-soda', 'cream-of-tartar']);
     expect(JSON.stringify(e)).not.toMatch(/REALIZED_AS_PROPOSED/);
-    expect(x.svc.getActiveRecipe().recipe!.steps.map((s) => s.text).join(' ')).not.toMatch(/straight away/);   // no instruction was added
+    expect((await x.svc.getActiveRecipe()).recipe!.steps.map((s) => s.text).join(' ')).not.toMatch(/straight away/);   // no instruction was added
   });
 
   it('a dropped sentence without hold words still blocks: an unread passage is never treated as absent', async () => {
     const d = sourceWith(drop(), (l) => (l.startsWith('3. Stir in the milk') ? `${l} Fold it over twice.` : l));
     const x = await imp(d.lines, d.reading);
-    expect(x.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NEEDS_FACTS' });
-    expect(x.use('baking powder', 2).analysis).toMatchObject({ status: 'blocked', reason: { code: 'missingFact' } });
-    expect(x.use('baking powder', 2).analysis!.reason!.text).toBe("The reading doesn't account for all of the original method (“fold it over twice” before step 4 isn't in the steps as read), so the reviewed alternative (baking soda and cream of tartar for baking powder) can't be offered: it needs the method from mixing to baking read in full.");
+    expect(await x.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NEEDS_FACTS' });
+    expect((await x.use('baking powder', 2)).analysis).toMatchObject({ status: 'blocked', reason: { code: 'missingFact' } });
+    expect((await x.use('baking powder', 2)).analysis!.reason!.text).toBe("The reading doesn't account for all of the original method (“fold it over twice” before step 4 isn't in the steps as read), so the reviewed alternative (baking soda and cream of tartar for baking powder) can't be offered: it needs the method from mixing to baking read in full.");
   });
 
   it('regression 2: a compound shaping-and-baking step read only as shaping → no recognized bake step, so B8 is not offered, said about the reading', async () => {
     const shapeBake = { key: 's3', text: 'Pat into rounds and bake for 12 minutes.', title: 'Shape and bake', technique: 'SHAPE' };
     const d = drop(); d.reading.steps[3] = shapeBake; d.lines[d.lines.length - 1] = `4. ${shapeBake.text}`;
     const x = await imp(d.lines, d.reading);
-    expect(x.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'SLOT_NONE:bake' } });
-    expect(x.use('baking powder', 2).analysis!.reason!.text).toMatch(/this reading has no recognized “bake” step after step 2, which the swap needs/);
+    expect(await x.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'SLOT_NONE:bake' } });
+    expect((await x.use('baking powder', 2)).analysis!.reason!.text).toMatch(/this reading has no recognized “bake” step after step 2, which the swap needs/);
     // the same compound step before a separate baking step: its stated time is unresolved, so B8 waits (never binds)
     const later = drop({ extraSteps: [{ after: 's2', step: { key: 'sx', text: 'Pat into rounds and leave for 15 minutes.', title: 'Shape', technique: 'SHAPE' } }] });
     const y = await imp(later.lines, later.reading);
-    expect(y.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NEEDS_FACTS' });
-    expect(y.use('baking powder', 2).analysis!.reason!.text).toMatch(/the time “15 minutes” in step 4 isn't accounted for/);
+    expect(await y.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NEEDS_FACTS' });
+    expect((await y.use('baking powder', 2)).analysis!.reason!.text).toMatch(/the time “15 minutes” in step 4 isn't accounted for/);
   });
 
   it('regression 3: a fully read, eligible method still gets the plan', async () => {
     const x = await imp(drop().lines, drop().reading);
-    expect(x.pack().recipe.steps.slice(1).map((s) => s.source)).toEqual(Array(3).fill({ located: true, gapBefore: '' }));
-    expect(x.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'BOUND' });
-    expect(plan(x.use('baking powder', 2))).toMatchObject({ ruleId: 'powder_from_soda_and_tartar@1' });
+    expect((await x.pack()).recipe.steps.slice(1).map((s) => s.source)).toEqual(Array(3).fill({ located: true, gapBefore: '' }));
+    expect(await x.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'BOUND' });
+    expect(plan(await x.use('baking powder', 2))).toMatchObject({ ruleId: 'powder_from_soda_and_tartar@1' });
   });
 });
 
@@ -200,23 +200,25 @@ describe('B1 / B2: scoped leavening refusals and their twins', () => {
 
   it('B1 scope: an acid in the recipe takes it out of scope; an unconfirmed ingredient leaves it unknown, and it still blocks an AI soda card', async () => {
     const acid = drop({ extraIng: [['l', '1 tbsp lemon juice', 'lemon juice', '1 tbsp']], extraSteps: [{ after: 's1', step: { key: 's1b', text: 'Stir the lemon juice into the milk.', title: 'Sour milk', technique: null } }], extraUses: [{ ingredientKey: 'l', stepKey: 's1b', quote: 'the lemon juice', amountText: null, functions: ['ACIDITY'] }] });
-    expect((await imp(acid.lines, acid.reading)).cover('soda_alone_for_powder')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'APPLICABILITY' } });
+    expect((await (await imp(acid.lines, acid.reading)).cover('soda_alone_for_powder'))).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'APPLICABILITY' } });
     const sodaCard = { useRef: 'U3', role: 'raises', functions: ['LEAVENING'], verdict: 'swap', swap: { ingredient: 'baking soda', kindId: 'baking-soda', amountText: '2 tsp', otherIngredients: [] },
       stepRewrites: [{ stepRef: 'S2', text: 'Whisk the flour, sugar, 2 tsp baking soda and salt.' }], siblings: [], tradeoff: 'They may taste a little different.', opinion: 'Use 2 tsp baking soda in step 2.' };
     const odd = drop({ extraIng: [['x', '1 tbsp golden syrup', 'golden syrup', '1 tbsp']], extraUses: [{ ingredientKey: 'x', stepKey: 's2', quote: 'the milk', amountText: null, functions: ['SWEETNESS'] }] });
     const y = await imp(odd.lines, odd.reading, { cards: [sodaCard] });
-    expect(y.cover('soda_alone_for_powder')).toMatchObject({ status: 'NEEDS_FACTS' });
-    expect(y.pack().cards!.find((e) => e.useId === y.use('baking powder', 2).id)!.reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Baking soda on its own for baking powder" refuses this replacement/);
+    expect(await y.cover('soda_alone_for_powder')).toMatchObject({ status: 'NEEDS_FACTS' });
+    const yBp = (await y.use('baking powder', 2)).id;
+    expect((await y.pack()).cards!.find((e) => e.useId === yBp)!.reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Baking soda on its own for baking powder" refuses this replacement/);
   });
 
   it('B2: leaving the leavening out is refused (an AI omission fails); a second leavener takes it out of scope', async () => {
     const omit = { useRef: 'U3', role: 'raises', functions: ['LEAVENING'], verdict: 'omit', swap: null, stepRewrites: [{ stepRef: 'S2', text: 'Whisk the flour, sugar and salt.' }], siblings: [], tradeoff: 'Denser.', opinion: 'Leave the baking powder out of step 2.' };
     const x = await imp(drop().lines, drop().reading, { cards: [omit] });
-    expect(x.pack().cards!.find((e) => e.useId === x.use('baking powder', 2).id)!.reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Leaving out the leavening" refuses leaving it out/);
-    expect(x.use('baking powder', 2).analysis!.status).toBe('available');   // the reviewed soda + cream of tartar plan still shows
-    expect(x.use('baking powder', 2).analysis!.ruledOut.map((r) => [r.ruleId, r.omission])).toEqual([['leavening_not_omittable@1', true], ['soda_alone_for_powder@1', false]]);
+    const xBp = (await x.use('baking powder', 2)).id;
+    expect((await x.pack()).cards!.find((e) => e.useId === xBp)!.reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Leaving out the leavening" refuses leaving it out/);
+    expect((await x.use('baking powder', 2)).analysis!.status).toBe('available');   // the reviewed soda + cream of tartar plan still shows
+    expect((await x.use('baking powder', 2)).analysis!.ruledOut.map((r) => [r.ruleId, r.omission])).toEqual([['leavening_not_omittable@1', true], ['soda_alone_for_powder@1', false]]);
     const two = drop({ extraIng: [['d', '½ tsp bicarbonate of soda', 'bicarbonate of soda', '½ tsp']], extraUses: [{ ingredientKey: 'd', stepKey: 's1', quote: 'salt', amountText: null, functions: ['LEAVENING'] }] });
-    expect((await imp(two.lines, two.reading)).cover('leavening_not_omittable')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'APPLICABILITY' } });
+    expect((await (await imp(two.lines, two.reading)).cover('leavening_not_omittable'))).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'APPLICABILITY' } });
   });
 });
 
@@ -265,21 +267,21 @@ describe('G13 on an imported shortcake: a refusal answers its replacement; unrel
   ] };
   it('E-11: shortening stays an AI plan beside the oil refusal; oat flour, the omission and milk-for-whipping are refused as drafted', async () => {
     const x = await imp(SHORTCAKE_LINES, SHORTCAKE_READING, cards);
-    const reason = (name: string, step: number) => x.pack().cards!.find((e) => e.useId === x.use(name, step).id)!;
-    const butter = x.use('butter', 3).analysis!;
+    const reason = async (name: string, step: number) => { const id = (await x.use(name, step)).id; return (await x.pack()).cards!.find((e) => e.useId === id)!; };
+    const butter = (await x.use('butter', 3)).analysis!;
     expect(butter).toMatchObject({ status: 'available', plans: [{ ruleId: null, title: 'Shortening for the butter', provenance: { kind: 'aiPrepared' } }] });
     expect(butter.ruledOut.map((r) => r.ruleId)).toEqual(['oil_for_cold_butter_rub_in@1']);
-    expect(reason('plain flour', 2).reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Oat flour for all the flour in a dough that rises"/);
-    const flour = x.use('plain flour', 2).analysis!;
+    expect((await reason('plain flour', 2)).reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Oat flour for all the flour in a dough that rises"/);
+    const flour = (await x.use('plain flour', 2)).analysis!;
     expect(flour).toMatchObject({ status: 'evaluatedNoOption', reason: { code: 'contradictsReviewedRule' } });
     expect(flour.reason!.text).toMatch(/^The alternative drafted at import \(oat flour for the plain flour\) isn’t offered\. CourseCorrect doesn't offer oat flour/);
     expect(flour.reason!.text).toMatch(/No other alternative was drafted for this use\.$/);
     expect(flour.reason!.detail).toContain('Prepared at import (AI) said: “Use 250 g oat flour for the plain flour.”');   // the original candidate and its reasons are kept
-    expect(reason('baking powder', 2).reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Leaving out the leavening" refuses leaving it out/);
-    expect(reason('heavy cream', 6).reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Milk and butter for cream that must whip" refuses this replacement/);   // milk alone: part of the refused pair
+    expect((await reason('baking powder', 2)).reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Leaving out the leavening" refuses leaving it out/);
+    expect((await reason('heavy cream', 6)).reason).toMatch(/^CONTRADICTS_REVIEWED_RULE: "Milk and butter for cream that must whip" refuses this replacement/);   // milk alone: part of the refused pair
     // the reading tags step 5 ("Pat … and bake") as shaping, so no step is recognized as baking: soda + cream of tartar is
     // not offered here, and the reason speaks about the reading, not the recipe
-    expect(x.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'SLOT_NONE:bake' } });
+    expect(await x.cover('powder_from_soda_and_tartar')).toMatchObject({ status: 'NOT_APPLICABLE', failedCheck: { code: 'SLOT_NONE:bake' } });
     // at the stove: oil is refused, and the AI's shortening plan is offered instead
     const k = await x.cook(2);
     const oil = await k.ask('butter', ['vegetable-oil']);
@@ -291,7 +293,7 @@ describe('protected work, successive changes, and unchanged heroes', () => {
   it('E-26/E-28: started work refuses the plan; the proposal is still answered', async () => {
     const x = await imp(drop().lines, drop().reading);
     const k = await x.cook(1);
-    k.progress(1, 'started');
+    await k.progress(1, 'started');
     const e = await k.ask('baking powder');                       // the plan touches the started step
     expect(e.outcome).toBe('refused');
     expect(JSON.stringify(e)).toMatch(/PROTECTED_WORK/);
@@ -299,21 +301,34 @@ describe('protected work, successive changes, and unchanged heroes', () => {
     expect(await k.ask('baking powder', ['baking-soda'])).toMatchObject({ outcome: 'refused', proposalResponse: { response: 'REFUSED' } });
     const y = await imp(drop().lines, drop().reading);
     const k2 = await y.cook(2);
-    k2.progress(2, 'started');
+    await k2.progress(2, 'started');
     const milk = await k2.ask('milk', ['evaporated-milk']);
     expect(milk.outcome).toBe('refused');
     expect(JSON.stringify(milk)).toMatch(/PROTECTED_WORK/);
   });
 
-  it('E-29: two changes to the same dry-mix step: the second is refused (CONFLICTS_WITH_EARLIER_CHANGE), never merged', async () => {
-    const k = await (await imp(drop().lines, drop().reading)).cook(1);
+  it('E-29 (ENGINE_SEMANTICS 4): two changes to the same dry-mix step compose: the second is re-bound on the changed step and keeps the first', async () => {
+    const i = await imp(drop().lines, drop().reading), k = await i.cook(1);
     const s1 = await k.ask('caster sugar', ['white-sugar']);
     if (s1.outcome !== 'needsFacts') throw new Error(s1.outcome);
     const s2 = await k.ask('caster sugar', ['white-sugar'], s1);
     if (s2.outcome !== 'proposal') throw new Error(s2.outcome);
-    expect(k.apply(s2).outcome).toBe('applied');
-    const bp = await k.ask('baking powder', ['baking-soda', 'cream-of-tartar']);
-    expect(JSON.stringify(bp)).toMatch(/CONFLICTS_WITH_EARLIER_CHANGE/);
+    expect((await k.apply(s2)).outcome).toBe('applied');
+    const b1 = await k.ask('baking powder', ['baking-soda', 'cream-of-tartar']);
+    if (b1.outcome !== 'needsFacts') throw new Error(JSON.stringify(b1));
+    const b2 = await k.ask('baking powder', ['baking-soda', 'cream-of-tartar'], b1);
+    if (b2.outcome !== 'proposal') throw new Error(JSON.stringify(b2));
+    expect((await k.apply(b2)).outcome).toBe('applied');
+    const run = (await i.svc.getActiveRecipe()).run!, dry = run.steps[1].effectiveText;
+    // both changes are in the one step: the sugar change (same weight, 20 g) and the leavening change with its note; neither original
+    expect(dry).toMatch(/20 g granulated sugar/);
+    expect(dry).toMatch(/½ tsp baking soda/);
+    expect(dry).toMatch(/1 tsp cream of tartar/);
+    expect(dry).toMatch(/without resting or chilling/);
+    expect(dry).not.toMatch(/caster|baking powder/i);
+    expect(run.appliedAmendments.map((a) => a.title)).toEqual(['Granulated sugar for caster sugar in a dry mix', 'Baking soda and cream of tartar for baking powder']);
+    expect(run.appliedAmendments[1].dependsOn).toEqual([{ amendmentId: run.appliedAmendments[0].id, relation: 'SHARES_STEP' }]);
+    expect(run.steps.slice(0, 2).map((s) => s.progress)).toEqual(['done', 'notStarted']);   // applying never marks a step done
   });
 
   it('the hero packs keep their bindings and quantities (risotto split; scone cream; shortcake whipping refusal)', () => {

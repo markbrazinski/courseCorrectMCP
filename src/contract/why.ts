@@ -55,6 +55,7 @@ export function missingText(c: WhyCtx, m: MissingFact): string {
     return m.expected === 'NOT_ASSESSED' ? `the method around step ${n} wasn't checked against the original` : m.expected === 'NOT_FOUND' ? `step ${n}'s wording wasn't found in the original` : `“${ex}” before step ${n} isn't in the steps as read`;
   }
   if (m.predicate === 'TIMING') return `the time “${m.expected}” in step ${stepOrder(r, m.subject.id)} isn't accounted for`;
+  if (m.predicate === 'TECHNIQUE' && m.subject.kind === 'USE') { const u = use(m.subject.id); return u ? `what is done with the ${short(u)} in step ${n(u)} (“${techLabel(c.v, m.expected)}”)` : 'what is done with the ingredient'; }
   if (m.predicate === 'TECHNIQUE') return c.v.techniques.some((x) => x.techniqueId === m.expected) ? `step ${stepOrder(r, m.subject.id)} recognized as “${techLabel(c.v, m.expected)}”` : `step ${stepOrder(r, m.subject.id)} recognized (what it does wasn't confirmed)`;
   const u = use(m.subject.id);
   return u ? `the ${short(u)}'s role in step ${n(u)} (${functionLabel(c.v, m.expected)}) on the role table` : `a role on the role table`;
@@ -81,6 +82,7 @@ export function checkText(c: WhyCtx, e: CoverageEntry): string {
     if (pr.kind === 'AMOUNT_IN_RANGE') return `the swap is reviewed only for ${formatRational(pr.min)}–${formatRational(pr.max)} ${unitText(pr.unit)}${pr.slot === '$target' && target ? `; this recipe uses ${amountDisplay(target.amount)}` : ''}`;
     if (pr.kind === 'RECIPE_HAS_USE_OF_CLASS') return pr.expect ? `the swap needs ${classLabel(c.v, pr.classId)} in the recipe` : `the recipe also has ${classLabel(c.v, pr.classId)}, which the swap doesn't account for`;
     if (pr.kind === 'NO_HOLD_BETWEEN') return `the recipe rests or chills before baking, and the swap has to be baked straight away`;
+    if (pr.kind === 'STEP_TEXT_MATCHES') return `the step's wording doesn't fit the swap's conditions`;
     return `this recipe doesn't meet the swap's conditions`;
   }
   if (code.startsWith('SLOT_')) {
@@ -93,6 +95,9 @@ export function checkText(c: WhyCtx, e: CoverageEntry): string {
   }
   if (code.startsWith('EXCEPTION:')) return lowerFirst(detail);
   if (code === 'CONTRADICTORY_PROPOSAL_CLAIMS') return 'two reviewed rules disagree about this use';
+  // successive changes (2026-10-11): the rule would undo part of a change accepted earlier in this session
+  if (code === 'DROPS_EARLIER_ALLOWANCE') { const u = use(detail); return `the reviewed swap would drop the "only if needed" extra ${u ? short(u) : 'amount'} your earlier change added, and it has no rule for that extra`; }
+  if (code === 'REWRITES_EARLIER_CHANGE') { const st = getStep(r, detail); return `the reviewed swap would rewrite step ${st ? stepOrder(r, detail) : '?'}, which your earlier change already altered`; }
   if (code === 'CARD_INVALID') return 'no swap could be worked out for this use at import';
   if (code === 'QUANTITY_OUTPUT_OUT_OF_DOMAIN' || code === 'QUANTITY_ROUNDING_ERROR') return 'the worked-out amounts would fall outside the reviewed range';
   if (code.startsWith('QUANTITY_UNRESOLVED') || e.status === 'QUANTITY_UNRESOLVED') return "the swap's amounts aren't worked out yet";
@@ -152,8 +157,12 @@ export function swapOf(c: WhyCtx, useId: Id): WireSwap {
 
 /** Structured reasons for a refused rescue. The engine decided; this only states why, from the pack and the result. */
 export function refusalWhy(c: WhyCtx, res: EvaluationResult, proposedKindIds: Id[]): Why {
+  const rf0 = res.refusal!;
+  // about this session, not about a rule: the engine's own sentence is the whole reason (2026-10-11)
+  if (rf0.code === 'REINTRODUCES_UNAVAILABLE') return { verdict: 'no', facts: [rf0.message.replace(/\.$/, '')], proposalAnswer: null };
+  if (rf0.code === 'KNOWLEDGE_UNAVAILABLE') return { verdict: 'noRule', facts: [rf0.message.replace(/\.$/, '')], proposalAnswer: null };
   const { r, use, n, short, roles, refusalOn, pattern } = lex(c);
-  const rf = res.refusal!, t = res.target, tu = t ? use(t.useId) : undefined;
+  const rf = rf0, t = res.target, tu = t ? use(t.useId) : undefined;
   const P = proposalClasses(c.v, proposedKindIds).classes;
   const said = and(proposedKindIds.map((k) => kindOf(c.v, k)?.short ?? k));
   const facts: string[] = [], answers: string[] = [];

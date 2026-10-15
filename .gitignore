@@ -18,7 +18,8 @@
 !/.gitignore
 !/README.md
 !/SETUP.md
-# /LICENSE: not allowed until an actual license decision exists.
+!/LICENSE
+!/authorization.example.json
 
 # Source and tests (TypeScript only).
 !/src/**/*.ts
@@ -34,6 +35,8 @@
 !/package-lock.json
 !/tsconfig.json
 !/content/approved/**/*.json
+# Proposed knowledge packets (2026-10-13): reviewable, never loaded by the product (only as test/report overlays).
+!/content/proposed/**/*.json
 
 # M3 (companion build and browser checks): exact paths only.
 !/vite.config.ts
@@ -43,6 +46,10 @@
 !/playwright.review.config.ts
 !/src/web/index.html
 !/src/web/tsconfig.json
+
+# Lambda deployment (2026-10-09): the two CloudFormation templates (no values; secrets are NoEcho parameters).
+!/infra/data.yaml
+!/infra/app.yaml
 
 # Not yet allowed — add by exact path when actually introduced:
 #   /public/assets/<deliberately chosen assets>  (place AFTER section 3)
@@ -193,3 +200,6 @@ temp/
 # The owner-authored sample recipe (OD-6, ENGINEERING demo content), for import by users and the review tests.
 !/samples/
 !/samples/scones-explicit.pdf
+# README screenshots (2026-10-14): exact files only.
+!/docs/images/risotto-proposal.png
+!/docs/images/shortcake-refusal.png

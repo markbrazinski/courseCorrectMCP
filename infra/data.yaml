@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CourseCorrect durable data for one environment: the workspace table and the knowledge table (DynamoDB on-demand) and
+  one private bucket (deployment artifacts, cached Polly clips). Deleting this stack deletes the data; `npm run cc -- destroy --mode full`
+  backs it up, turns deletion protection off and empties the bucket first. No always-on charge: storage and requests only.
+
+Parameters:
+  Env:
+    Type: String
+    AllowedPattern: '[a-z][a-z0-9-]{1,20}'
+    Description: Environment name (e.g. review, judging)
+  DeletionProtection:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+
+Resources:
+  Table:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub cc-${Env}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      DeletionProtectionEnabled: !Ref DeletionProtection
+      Tags:
+        - { Key: app, Value: coursecorrect }
+        - { Key: env, Value: !Ref Env }
+
+  # Culinary knowledge releases (2026-10-11): immutable, content-addressed releases the owner publishes with
+  # `npm run cc -- knowledge publish`; the functions may only read it (app.yaml). Saved recipes and cooking sessions are pinned
+  # to a release, so it is backed up and restored with the workspace table and never deleted on its own.
+  KnowledgeTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub cc-${Env}-knowledge
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      DeletionProtectionEnabled: !Ref DeletionProtection
+      Tags:
+        - { Key: app, Value: coursecorrect }
+        - { Key: env, Value: !Ref Env }
+
+  Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub cc-${Env}-${AWS::AccountId}
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }]
+      LifecycleConfiguration:
+        Rules:
+          - { Id: old-artifacts, Status: Enabled, Prefix: artifacts/, ExpirationInDays: 30 }
+          - { Id: abandoned-uploads, Status: Enabled, AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 } }
+          # recipe PDFs held for OCR (2026-10-13): deleted by the import once read; this is the backstop for any left behind
+          - { Id: ocr-input, Status: Enabled, Prefix: ocr-input/, ExpirationInDays: 1 }
+      Tags:
+        - { Key: app, Value: coursecorrect }
+        - { Key: env, Value: !Ref Env }
+
+Outputs:
+  TableName: { Value: !Ref Table }
+  TableArn: { Value: !GetAtt Table.Arn }
+  KnowledgeTableName: { Value: !Ref KnowledgeTable }
+  BucketName: { Value: !Ref Bucket }
+  BucketArn: { Value: !GetAtt Bucket.Arn }

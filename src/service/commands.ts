@@ -1,38 +1,64 @@
-// Tool semantics, receipts, fencing and transactions (ESOD §7, §8.2). Thin over the pure engine.
+// Tool semantics, receipts, fencing and transactions (ESOD §7, §8.2). Thin over the pure engine. One Service per workspace
+// (a judge's sign-in, or the local kitchen): every item lives in that workspace's partition, and every mutation is one
+// serializable workspace transaction (kv.ts), the equivalent of the SQLite build's BEGIN IMMEDIATE.
 import { randomUUID } from 'node:crypto';
 import { MAX_CHANGES_PER_RUN } from '../contract/types.ts';
-import type { EvaluationResult, Id, Recipe, RecipePack, RescueRequest, RunSnapshot, StepStatus, UseStatus } from '../contract/types.ts';
+import type { EvaluationResult, Id, Recipe, RecipePack, RescueRequest, RunSnapshot, StepStatus, UseStatus, Vocabulary } from '../contract/types.ts';
 import { hash } from '../domain/rational.ts';
 import { currentStepId, getStep, renderStep } from '../domain/recipe.ts';
-import { evaluate } from '../engine/evaluate.ts';
+import { evaluate, knowledgeUnavailable } from '../engine/evaluate.ts';
 import { applyProgress, type ProgressAction } from '../engine/progress.ts';
 import {
   contentLabel, coverageSummary, progressOf, recipeContent, rescueEvaluation, type RecipeBookEntry, type RecipeContent, type RescueEvaluation, type WireAmendment, type WireRun,
 } from '../contract/project.ts';
-import type { Authoring } from '../authoring/drafts.ts';
-import type { Content } from './content.ts';
+import type { Authoring, ImportJob, WireDraft } from '../authoring/drafts.ts';
+import { pinOf, rebindOf, staticKnowledge, KnowledgeUnavailable, type Content, type Knowledge, type Pin } from './content.ts';
 import { refusalWhy } from '../contract/why.ts';
 import { explain, noneExplainer, type Explainer } from './explain.ts';
 import { noticesOf, type Interpreter } from './interpret.ts';
-import { Store, type Row } from './store.ts';
+import { pad, tx, wsPk, type Kv, type Meta, type Tx } from './kv.ts';
 
 /** Saved imported recipes (from authoring): latest version per recipe, with engine-computed eligibility. */
 export interface CatalogEntry { recipeId: Id; pack: RecipePack | null; release: RecipeBookEntry['release']; title: string; meta: string; sourceLabel: string; versionId?: string }
 export interface ServiceOptions {
-  dbPath: string; content: Content; interpreter: Interpreter; explainer?: Explainer; catalog?: () => CatalogEntry[];
+  kv: Kv; interpreter: Interpreter;
+  /** The knowledge releases (the runtime authority; storeKnowledge on the deployed service). Or one release, `content` (tests). */
+  knowledge?: Knowledge; content?: Content; explainer?: Explainer; catalog?: (t: Tx) => Promise<CatalogEntry[]>;
+  /** The workspace (partition) this service acts in. Default: the local kitchen. */
+  ws?: string;
   /** List the hand-authored approved recipes in the Recipe Book (test fixtures since the demo recipes come through import). */
   fixtureRecipes?: boolean | Set<Id>;   // true = all; a set = only those (the rest come in through import)
-  kitchenId?: string; now?: () => string; newId?: (prefix: string) => string;
+  now?: () => string; newId?: (prefix: string) => string;
+  /** PENDING work older than this was interrupted (a Lambda invocation can't outlive its timeout). */
+  leaseMs?: number;
 }
 export type Rejected = { outcome: 'rejected'; code: string; message: string; run: WireRun | null; activeRun?: { runId: Id; recipeTitle: string } };
 type Replayable<T> = (T | Rejected) & { replayed?: true };
 
-interface RunRow {
-  run_id: string; kitchen_id: string; recipe_id: string; pack_hash: string; epoch: number; mode: 'COOK' | 'ENGINEERING'; status: 'ACTIVE' | 'FINISHED' | 'ARCHIVED';
-  revision: number; version: number; applied_rescue_count: number; latest_evaluation_id: string | null; step_status: string; use_status: string;
+export interface RunItem {
+  runId: string; recipeId: string; packHash: string; epoch: number; mode: 'COOK' | 'ENGINEERING'; status: 'ACTIVE' | 'FINISHED' | 'ARCHIVED';
+  revision: number; version: number; appliedRescueCount: number; latestEvaluationId: string | null; reservedEvaluationId: string | null;
+  stepStatus: Record<Id, StepStatus>; useStatus: Record<Id, UseStatus>; progressCount: number; createdAt: string; v?: number;
+  /** The knowledge release the run is pinned to for its whole life (2026-10-11); absent on runs started before releases. */
+  knowledge?: Pin;
+  /** Kinds the cook said they are out of, one per accepted change: no later plan may bring one back. */
+  unavailableKinds?: Id[];
 }
-interface EvalRow { evaluation_id: string; run_id: string; base_revision: number; version: number; state: string; request_json: string; result_json: string | null; interpretation: string | null }
 interface StoredRequest { request: RescueRequest; utterance: { text: string; channel: string } | null }
+export interface EvalItem { evaluationId: string; runId: string; baseRevision: number; version: number; state: string; request: StoredRequest | null; result: { engine: EvaluationResult; wire: RescueEvaluation } | null; interpretation: string | null; at: string; owner: string; v?: number }
+export interface ReceiptItem { commandId: string; tool: string; runId: string | null; digest: string; state: 'PENDING' | 'DONE' | 'INTERRUPTED'; result: unknown; at: string; owner: string; v?: number }
+export interface AmendmentItem { amendmentId: string; runId: string; evaluationId: string; candidateId: string; planHash: string; commandId: string; fromVersion: number; toVersion: number; revisionAfter: number; changedStepIds: Id[]; at: string;
+  /** 2026-10-11: what authorized it and what it builds on (absent on amendments applied before) */
+  title?: string; origin?: 'REVIEWED' | 'IMPORT_CARD'; knowledgeReleaseId?: string | null; missingIngredientId?: Id | null;
+  dependsOn?: { amendmentId: string; relation: 'REPLACES_INTRODUCED' | 'SHARES_STEP' }[] }
+
+/** Item keys in a workspace partition. */
+export const K = {
+  run: (r: string) => `RUN#${r}`, version: (r: string, v: number) => `RUN#${r}#V#${pad(v)}`, progress: (r: string, n: number) => `RUN#${r}#P#${pad(n)}`,
+  amendments: (r: string) => `RUN#${r}#A#`, amendment: (r: string, toVersion: number) => `RUN#${r}#A#${pad(toVersion)}`,
+  byCommand: (c: string) => `AMCMD#${c}`, byEvaluation: (e: string) => `AMEV#${e}`,
+  evaluation: (e: string) => `EV#${e}`, receipt: (c: string) => `RC#${c}`, pack: (h: string) => `PACK#${h}`, activity: (n: number) => `ACT#${pad(n)}`,
+};
 
 const MESSAGES: Record<string, string> = {
   INVALID_COMMAND: 'This request is missing a required field (commandId, epoch or expectedRevision).',
@@ -56,6 +82,7 @@ const MESSAGES: Record<string, string> = {
   ACCEPTANCE_REQUIRED: 'Applying a change needs explicit acceptance.',
   NOT_LATEST_EVALUATION: 'A newer check replaced this proposal. Check again.',
   NOT_ACTIONABLE: 'This proposal can no longer be applied. Check again.',
+  KNOWLEDGE_UNAVAILABLE: "The reviewed knowledge this recipe was prepared with isn't available, so nothing can be checked or applied. Your recipe is unchanged.",
   PLAN_MISMATCH: "That isn't the change that was shown. Check again.",
   PLAN_CHANGED: 'The change no longer matches your recipe. Check again.',
   SUCCESSIVE_RESCUE_UNSUPPORTED: `This cooking session already used its ${MAX_CHANGES_PER_RUN} changes.`,
@@ -64,65 +91,82 @@ const MESSAGES: Record<string, string> = {
   INTERNAL: 'Something went wrong; nothing was changed.',
 };
 
+/** Immutable packs by hash, shared by every workspace in the process (content-addressed, so sharing can't leak or change one). */
+const packCache = new Map<string, RecipePack>();
+export const LEASE_MS = 120_000;
+/** Labels only, when a run's release can't be read: ids show as themselves; nothing is decided with it. */
+const NO_VOCAB: Vocabulary = { schema: 'cc-vocabulary/1', version: 0, functions: [], techniques: [], classes: [], kinds: [] };
+/** A pack's release: its content (null when it can't be read or established) and how the pack relates to it. */
+type Known = { content: Content | null; pin: Pin; why: string | null };
+
 export class Service {
-  readonly store: Store;
-  readonly content: Content;
+  readonly kv: Kv;
+  readonly ws: string;
+  readonly knowledge: Knowledge;
   readonly interpreter: Interpreter;
   readonly explainer: Explainer;
-  readonly kitchenId: string;
   private readonly now: () => string;
   private readonly newId: (prefix: string) => string;
-  private readonly packs = new Map<string, RecipePack>();
+  private readonly leaseMs: number;
   private readonly fixtureRecipes: boolean | Set<Id>;
   private listed(recipeId: Id) { return this.fixtureRecipes === true || (this.fixtureRecipes instanceof Set && this.fixtureRecipes.has(recipeId)); }
-  catalog: () => CatalogEntry[];
+  catalog: (t: Tx) => Promise<CatalogEntry[]>;
 
   constructor(o: ServiceOptions) {
-    this.store = new Store(o.dbPath);
-    this.content = o.content;
+    this.kv = o.kv;
+    this.ws = o.ws ?? 'kitchen';
+    if (!o.knowledge && !o.content) throw new Error('Service needs knowledge (or one release as content)');
+    this.knowledge = o.knowledge ?? staticKnowledge(o.content!);
     this.interpreter = o.interpreter;
     this.explainer = o.explainer ?? noneExplainer;
-    this.kitchenId = o.kitchenId ?? 'kitchen';
     this.now = o.now ?? (() => new Date().toISOString());
     this.newId = o.newId ?? ((p) => `${p}_${randomUUID()}`);
-    this.catalog = o.catalog ?? (() => []);
+    this.leaseMs = o.leaseMs ?? LEASE_MS;
+    this.catalog = o.catalog ?? (async () => []);
     this.fixtureRecipes = o.fixtureRecipes ?? true;
-    this.store.tx(() => {
-      this.store.run('INSERT OR IGNORE INTO kitchens(kitchen_id, epoch) VALUES (?, 1)', this.kitchenId);
-      for (const p of o.content.packs.values()) this.store.run('INSERT OR IGNORE INTO packs(pack_hash, recipe_id, json) VALUES (?, ?, ?)', p.packHash, p.recipe.recipeId, JSON.stringify(p));
-      // startup recovery: never auto-retry; PENDING becomes INTERRUPTED
-      this.store.run(`UPDATE receipts SET state = 'INTERRUPTED' WHERE state = 'PENDING'`);
-      this.store.run(`UPDATE evaluations SET state = 'INTERRUPTED' WHERE state = 'PENDING'`);
-    });
   }
+  private tx<T>(fn: (t: Tx, meta: Meta) => Promise<T>) { return tx(this.kv, this.ws, fn); }
+  /** PENDING work whose process has ended, or whose lease has passed, was interrupted (never resumed or re-applied). */
+  interrupted(x: { owner: string; at: string }) { return !this.kv.alive(x.owner) || Date.parse(this.now()) - Date.parse(x.at) > this.leaseMs; }
 
   // ---------- helpers ----------
-  private epoch() { return this.store.get<{ epoch: number }>('SELECT epoch FROM kitchens WHERE kitchen_id = ?', this.kitchenId)!.epoch; }
-  private pack(hashId: string): RecipePack {
-    let p = this.packs.get(hashId);
-    if (!p) { p = JSON.parse(this.store.get<{ json: string }>('SELECT json FROM packs WHERE pack_hash = ?', hashId)!.json) as RecipePack; this.packs.set(hashId, p); }
+  /** The example recipes of the ACTIVE release (none while no release can be read: never the bundled files). */
+  private async examples(): Promise<Content | null> { try { return await this.knowledge.active(); } catch (e) { if (e instanceof KnowledgeUnavailable) return null; throw e; } }
+  /** The knowledge a pack's plans came from (2026-10-11): its pinned release, or for a pack saved before releases a release with
+   *  the same vocabulary and patterns. Unreadable or unknown: content null, and nothing can be evaluated or applied. */
+  async known(pack: RecipePack): Promise<Known> {
+    const pin = await pinOf(this.knowledge, pack);
+    if (!pin.releaseId) return { content: null, pin, why: 'saved before knowledge versions were recorded, and no published release matches it' };
+    try { return { content: await this.knowledge.get(pin.releaseId), pin, why: null }; }
+    catch (e) { if (e instanceof KnowledgeUnavailable) return { content: null, pin, why: e.message }; throw e; }
+  }
+  private async pack(t: Tx, hashId: string): Promise<RecipePack> {
+    let p = packCache.get(hashId);
+    if (!p) {
+      p = (await t.must<{ pack: RecipePack }>(K.pack(hashId))).pack;
+      if (packCache.size > 200) packCache.clear();   // ponytail: a bounded process cache; an LRU if many recipes are ever cooked at once
+      packCache.set(hashId, p);
+    }
     return p;
   }
-  private runRow(runId: string) { return this.store.get<RunRow>('SELECT * FROM runs WHERE run_id = ?', runId); }
-  private activeRow() { return this.store.get<RunRow>(`SELECT * FROM runs WHERE kitchen_id = ? AND status = 'ACTIVE'`, this.kitchenId); }
-  private recipeAt(runId: string, version: number): Recipe {
-    return JSON.parse(this.store.get<{ recipe_json: string }>('SELECT recipe_json FROM run_versions WHERE run_id = ? AND version = ?', runId, version)!.recipe_json) as Recipe;
-  }
-  private snapshot(row: RunRow): RunSnapshot {
+  private runRow(t: Tx, runId: string) { return t.get<RunItem>(K.run(runId)); }
+  private async activeRow(t: Tx, meta: Meta) { return meta.activeRunId ? (await this.runRow(t, meta.activeRunId)) ?? null : null; }
+  private async recipeAt(t: Tx, runId: string, version: number): Promise<Recipe> { return (await t.must<{ recipe: Recipe }>(K.version(runId, version))).recipe; }
+  private async snapshot(t: Tx, row: RunItem): Promise<RunSnapshot> {
     return {
-      runId: row.run_id, epoch: row.epoch, packHash: row.pack_hash, mode: row.mode, revision: row.revision, version: row.version,
-      appliedRescueCount: row.applied_rescue_count, recipe: this.recipeAt(row.run_id, row.version),
-      stepStatus: JSON.parse(row.step_status) as Record<Id, StepStatus>, useStatus: JSON.parse(row.use_status) as Record<Id, UseStatus>,
+      runId: row.runId, epoch: row.epoch, packHash: row.packHash, mode: row.mode, revision: row.revision, version: row.version,
+      appliedRescueCount: row.appliedRescueCount, recipe: await this.recipeAt(t, row.runId, row.version), stepStatus: row.stepStatus, useStatus: row.useStatus,
+      knowledgeReleaseId: row.knowledge?.releaseId ?? null, unavailableKinds: row.unavailableKinds ?? [],
     };
   }
-  private amendmentsOf(runId: string) { return this.store.all<Row>('SELECT * FROM amendments WHERE run_id = ? ORDER BY to_version', runId); }
+  private amendmentsOf(t: Tx, runId: string) { return t.query<AmendmentItem>(K.amendments(runId)); }
 
-  wireRun(row: RunRow): WireRun {
-    const snap = this.snapshot(row), v1 = this.recipeAt(row.run_id, 1), ams = this.amendmentsOf(row.run_id);
-    const changedBy = (stepId: Id) => [...ams].reverse().find((a) => (JSON.parse(a.changed_step_ids as string) as Id[]).includes(stepId));
-    const pack = this.pack(row.pack_hash);
+  async wireRun(t: Tx, row: RunItem, amendments?: AmendmentItem[]): Promise<WireRun> {
+    const snap = await this.snapshot(t, row), v1 = await this.recipeAt(t, row.runId, 1), ams = amendments ?? await this.amendmentsOf(t, row.runId);
+    const changedBy = (stepId: Id) => [...ams].reverse().find((a) => a.changedStepIds.includes(stepId));
+    const pack = await this.pack(t, row.packHash);
     return {
-      id: row.run_id, recipeId: row.recipe_id, recipeVersionId: pack.recipeHash, epoch: row.epoch, revision: row.revision, version: row.version,
+      id: row.runId, recipeId: row.recipeId, recipeVersionId: pack.recipeHash, epoch: row.epoch, revision: row.revision, version: row.version,
       state: row.status === 'ACTIVE' ? 'active' : 'ended', mode: row.mode,
       contentLabel: contentLabel(row.mode, pack.bindings.some((b) => b.quantityStatus === 'PROVISIONAL' && !b.card)),
       steps: snap.recipe.steps.map((s) => {
@@ -132,63 +176,72 @@ export class Service {
         return {
           stepId: s.stepId, progress, effectiveText: eff, originalText: was !== null && was !== eff ? was : null,
           partialUseIds: progress === 'partly' ? snap.recipe.uses.filter((u) => u.stepId === s.stepId && (snap.useStatus[u.useId] ?? 'UNADDED') !== 'UNADDED').map((u) => u.useId) : [],
-          changedByAmendmentId: (changedBy(s.stepId)?.amendment_id as string | undefined) ?? null, onHold: null,
+          changedByAmendmentId: changedBy(s.stepId)?.amendmentId ?? null, onHold: null,
         };
       }),
       currentStepId: currentStepId(snap.recipe, snap.stepStatus),
       appliedAmendments: ams.map((a) => this.wireAmendment(a)), pendingCommand: null,
+      knowledge: row.knowledge ?? (await pinOf(this.knowledge, pack)),
     };
   }
-  private wireAmendment(am: Row): WireAmendment {
-    return { id: am.amendment_id as string, commandId: am.command_id as string, candidateId: am.candidate_id as string, planId: am.plan_hash as string,
-      changedStepIds: JSON.parse(am.changed_step_ids as string) as Id[], appliedAtRunRevision: am.revision_after as number, fromVersion: am.from_version as number, toVersion: am.to_version as number };
+  private wireAmendment(am: AmendmentItem): WireAmendment {
+    return { id: am.amendmentId, commandId: am.commandId, candidateId: am.candidateId, planId: am.planHash,
+      changedStepIds: am.changedStepIds, appliedAtRunRevision: am.revisionAfter, fromVersion: am.fromVersion, toVersion: am.toVersion,
+      title: am.title ?? null, knowledgeReleaseId: am.knowledgeReleaseId ?? null, dependsOn: am.dependsOn ?? [] };
   }
-  private reject(code: string, row?: RunRow | null, message?: string): Rejected {
-    return { outcome: 'rejected', code, message: message ?? MESSAGES[code] ?? code, run: row ? this.wireRun(this.runRow(row.run_id)!) : null };
+  /** Display for a run's recipe: labels and plan summaries from its release (ids only if that can't be read). */
+  private async contentFor(t: Tx, row: RunItem, pack: RecipePack, r: Recipe, ams?: AmendmentItem[]) {
+    const k = (await this.known(pack)).content;
+    ams ??= await this.amendmentsOf(t, row.runId);
+    return recipeContent(r, k?.vocab ?? NO_VOCAB, pack, await this.recipeAt(t, row.runId, 1), k?.patterns ?? [], undefined,
+      (version) => { const a = ams.find((x) => x.fromVersion === version); return a ? { amendmentId: a.amendmentId, title: a.title ?? null } : null; });
+  }
+  private async reject(t: Tx, code: string, row?: RunItem | null, message?: string): Promise<Rejected> {
+    return { outcome: 'rejected', code, message: message ?? MESSAGES[code] ?? code, run: row ? await this.wireRun(t, (await this.runRow(t, row.runId))!) : null };
   }
   private digest(tool: string, input: object) { const { commandId: _c, ...rest } = input as Record<string, unknown>; return hash({ tool, input: rest }); }
 
   /** Receipt lookup. Returns a stored result to replay, a rejection, or null to proceed (inside the caller's transaction). */
-  private receiptGate<T>(tool: string, input: object): Replayable<T> | null {
+  private async receiptGate<T>(t: Tx, tool: string, input: object): Promise<Replayable<T> | null> {
     const commandId = (input as { commandId?: unknown }).commandId;
-    if (typeof commandId !== 'string' || !commandId) return this.reject('INVALID_COMMAND') as Replayable<T>;
-    const rc = this.store.get<{ tool: string; payload_digest: string; state: string; result_json: string | null }>(
-      'SELECT tool, payload_digest, state, result_json FROM receipts WHERE kitchen_id = ? AND command_id = ?', this.kitchenId, commandId);
+    if (typeof commandId !== 'string' || !commandId) return await this.reject(t, 'INVALID_COMMAND') as Replayable<T>;
+    const rc = await t.get<ReceiptItem>(K.receipt(commandId));
     if (!rc) return null;
-    if (rc.payload_digest !== this.digest(tool, input)) return this.reject('COMMAND_ID_REUSE') as Replayable<T>;
-    if (rc.state === 'PENDING') return this.reject('IN_PROGRESS') as Replayable<T>;
-    if (rc.state === 'INTERRUPTED') return this.reject('INTERRUPTED') as Replayable<T>;
-    const stored = JSON.parse(rc.result_json!) as T & { outcome?: string };
+    if (rc.digest !== this.digest(tool, input)) return await this.reject(t, 'COMMAND_ID_REUSE') as Replayable<T>;
+    const state = this.receiptState(rc);
+    if (state === 'PENDING') return await this.reject(t, 'IN_PROGRESS') as Replayable<T>;
+    if (state === 'INTERRUPTED') return await this.reject(t, 'INTERRUPTED') as Replayable<T>;
+    const stored = rc.result as T & { outcome?: string };
     return { ...stored, ...(stored.outcome === 'applied' ? { outcome: 'alreadyApplied' } : {}), replayed: true } as Replayable<T>;
   }
-  private writeReceipt(tool: string, input: object, runId: string | null, state: 'PENDING' | 'DONE', result: unknown) {
-    this.store.run(`INSERT INTO receipts(kitchen_id, command_id, tool, run_id, payload_digest, state, result_json, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(kitchen_id, command_id) DO UPDATE SET state = excluded.state, result_json = excluded.result_json`,
-      this.kitchenId, (input as { commandId: string }).commandId, tool, runId, this.digest(tool, input), state, result === null ? null : JSON.stringify(result), this.now());
+  private receiptState(rc: ReceiptItem) { return rc.state === 'PENDING' && this.interrupted(rc) ? 'INTERRUPTED' : rc.state; }
+  private async writeReceipt(t: Tx, tool: string, input: object, runId: string | null, state: 'PENDING' | 'DONE', result: unknown) {
+    const commandId = (input as { commandId: string }).commandId, cur = await t.get<ReceiptItem>(K.receipt(commandId));
+    t.put(K.receipt(commandId), { commandId, tool, runId: cur?.runId ?? runId, digest: this.digest(tool, input), state, result, at: cur?.at ?? this.now(), owner: this.kv.owner, v: cur?.v } satisfies ReceiptItem);
   }
   /** Run checks shared by run-scoped mutations. */
-  private checkRun(input: { runId?: string; epoch?: number }): RunRow | Rejected {
-    if (typeof input.runId !== 'string' || typeof input.epoch !== 'number') return this.reject('INVALID_COMMAND');
-    const row = this.runRow(input.runId);
-    if (!row) return this.reject('RUN_NOT_FOUND');
-    if (row.status === 'ARCHIVED' || row.epoch !== input.epoch || row.epoch !== this.epoch()) return this.reject('RUN_EXPIRED', row);
-    if (row.status === 'FINISHED') return this.reject('RUN_ENDED', row);
+  private async checkRun(t: Tx, meta: Meta, input: { runId?: string; epoch?: number }): Promise<RunItem | Rejected> {
+    if (typeof input.runId !== 'string' || typeof input.epoch !== 'number') return this.reject(t, 'INVALID_COMMAND');
+    const row = await this.runRow(t, input.runId);
+    if (!row) return this.reject(t, 'RUN_NOT_FOUND');
+    if (row.status === 'ARCHIVED' || row.epoch !== input.epoch || row.epoch !== meta.epoch) return this.reject(t, 'RUN_EXPIRED', row);
+    if (row.status === 'FINISHED') return this.reject(t, 'RUN_ENDED', row);
     return row;
   }
 
   // ---------- list_recipes ----------
   /** Approved engineering content (eligible) plus saved imports (eligibility computed at save). Never drafts. */
-  private entries(): CatalogEntry[] {
-    const archived = new Set(this.store.all<{ recipe_id: string }>('SELECT recipe_id FROM archived_recipes').map((r) => r.recipe_id));
+  private async entries(t: Tx, meta: Meta): Promise<CatalogEntry[]> {
+    const ex = await this.examples();
     return [
-      ...[...this.content.packs.values()].filter((p) => this.listed(p.recipe.recipeId)).map((p) => ({ recipeId: p.recipe.recipeId, pack: p as RecipePack | null, release: { kind: 'eligible' as const, coverageSummary: '' }, title: p.recipe.title, meta: p.recipe.meta, sourceLabel: p.recipe.source?.label ?? '' })),
-      ...this.catalog(),
-    ].filter((e) => !archived.has(e.recipeId));
+      ...[...(ex?.packs.values() ?? [])].filter((p) => this.listed(p.recipe.recipeId)).map((p) => ({ recipeId: p.recipe.recipeId, pack: p as RecipePack | null, release: { kind: 'eligible' as const, coverageSummary: '' }, title: p.recipe.title, meta: p.recipe.meta, sourceLabel: p.recipe.source?.label ?? '' })),
+      ...await this.catalog(t),
+    ].filter((e) => !meta.archived[e.recipeId]);
   }
-  listRecipes(): { recipes: RecipeBookEntry[] } {
-    const active = this.activeRow();
+  private async book(t: Tx, meta: Meta): Promise<{ recipes: RecipeBookEntry[] }> {
+    const active = await this.activeRow(t, meta);
     return {
-      recipes: this.entries().map((e) => {
+      recipes: (await this.entries(t, meta)).map((e) => {
         const p = e.pack;
         if (!p || e.release.kind === 'ineligible') {
           return { recipeId: e.recipeId, currentVersionId: p?.recipeHash ?? e.versionId ?? '', title: e.title, meta: e.meta, sourceLabel: e.sourceLabel, release: e.release, activeRunId: null };
@@ -196,89 +249,105 @@ export class Service {
         return {
           recipeId: p.recipe.recipeId, currentVersionId: p.recipeHash, title: p.recipe.title, meta: p.recipe.meta, sourceLabel: e.sourceLabel,
           release: { kind: 'eligible' as const, coverageSummary: coverageSummary(p) },
-          activeRunId: active && active.recipe_id === p.recipe.recipeId ? active.run_id : null,
+          activeRunId: active && active.recipeId === p.recipe.recipeId ? active.runId : null,
         };
       }),
     };
   }
+  listRecipes() { return this.tx((t, meta) => this.book(t, meta)); }
 
   /** Approved content as a recipe page (GET /recipes/:id for recipes that are not imports). */
-  approvedRecipe(recipeId: string) {
-    const p = this.listed(recipeId) ? this.content.packs.get(recipeId) : undefined;
-    if (!p) return null;
-    return { version: { id: p.recipeHash, recipeId, createdFromDraft: null, content: recipeContent(p.recipe, this.content.vocab, p, p.recipe, this.content.patterns, { pending: false }), release: this.listRecipes().recipes.find((r) => r.recipeId === recipeId)!.release }, sources: [] };
+  async approvedRecipe(recipeId: string) {
+    const ex = await this.examples();
+    const p = this.listed(recipeId) ? ex?.packs.get(recipeId) : undefined;
+    if (!p || !ex) return null;
+    const release = (await this.listRecipes()).recipes.find((r) => r.recipeId === recipeId)?.release;
+    if (!release) return null;   // archived from this workspace's book
+    return { version: { id: p.recipeHash, recipeId, createdFromDraft: null, content: recipeContent(p.recipe, ex.vocab, p, p.recipe, ex.patterns, { pending: false }), release }, sources: [] };
   }
 
   // ---------- start_recipe (C-3: explicit, confirmed, atomic replacement) ----------
   startRecipe(input: { commandId?: string; recipeId: string; recipeVersionId?: string; replace?: { runId: string; epoch: number; expectedRevision: number; confirm: boolean } }) {
     type Started = { outcome: 'started'; run: WireRun; recipe: RecipeContent };
-    return this.store.tx((): Replayable<Started> => {
-      const gate = this.receiptGate<Started>('start_recipe', input);
+    return this.tx(async (t, meta): Promise<Replayable<Started>> => {
+      const gate = await this.receiptGate<Started>(t, 'start_recipe', input);
       if (gate) return gate;
-      const done = (res: Started | Rejected, runId: string | null) => { this.writeReceipt('start_recipe', input, runId, 'DONE', res); return res; };
-      const entry = this.entries().find((e) => e.recipeId === input.recipeId);
-      if (!entry) return done(this.reject('RECIPE_NOT_FOUND'), null);
+      const done = async (res: Started | Rejected, runId: string | null) => { await this.writeReceipt(t, 'start_recipe', input, runId, 'DONE', res); return res; };
+      const entry = (await this.entries(t, meta)).find((e) => e.recipeId === input.recipeId);
+      if (!entry) return done(await this.reject(t, 'RECIPE_NOT_FOUND'), null);
       if (!entry.pack || entry.release.kind === 'ineligible') {
-        return done(this.reject('NOT_ELIGIBLE', null, entry.release.kind === 'ineligible' ? entry.release.reasons.map((r) => r.message).join(' ') : undefined), null);
+        return done(await this.reject(t, 'NOT_ELIGIBLE', null, entry.release.kind === 'ineligible' ? entry.release.reasons.map((r) => r.message).join(' ') : undefined), null);
       }
       const pack = entry.pack;
-      if (input.recipeVersionId && input.recipeVersionId !== pack.recipeHash) return done(this.reject('VERSION_MISMATCH'), null);
-      const active = this.activeRow();
+      if (input.recipeVersionId && input.recipeVersionId !== pack.recipeHash) return done(await this.reject(t, 'VERSION_MISMATCH'), null);
+      const active = await this.activeRow(t, meta);
       if (active) {
         const rp = input.replace;
-        if (!rp) return done({ ...this.reject('ACTIVE_RUN_EXISTS', active), activeRun: { runId: active.run_id, recipeTitle: this.pack(active.pack_hash).recipe.title } }, null);
-        if (rp.confirm !== true) return done(this.reject('REPLACE_NOT_CONFIRMED', active), null);
-        if (rp.runId !== active.run_id || rp.epoch !== active.epoch) return done(this.reject('RUN_EXPIRED', active), null);
-        if (rp.expectedRevision !== active.revision) return done(this.reject('STALE_STATE', active), null);
-        this.store.run(`UPDATE runs SET status = 'ARCHIVED' WHERE run_id = ?`, active.run_id);   // history preserved
+        if (!rp) return done({ ...await this.reject(t, 'ACTIVE_RUN_EXISTS', active), activeRun: { runId: active.runId, recipeTitle: (await this.pack(t, active.packHash)).recipe.title } }, null);
+        if (rp.confirm !== true) return done(await this.reject(t, 'REPLACE_NOT_CONFIRMED', active), null);
+        if (rp.runId !== active.runId || rp.epoch !== active.epoch) return done(await this.reject(t, 'RUN_EXPIRED', active), null);
+        if (rp.expectedRevision !== active.revision) return done(await this.reject(t, 'STALE_STATE', active), null);
+        t.put(K.run(active.runId), { ...active, status: 'ARCHIVED' });   // history preserved
+        meta.activeRunId = null;
       }
-      const row = this.createRun(pack);
-      return done({ outcome: 'started', run: this.wireRun(row), recipe: recipeContent(pack.recipe, this.content.vocab, pack, pack.recipe, this.content.patterns) }, row.run_id);
+      const row = await this.createRun(t, meta, pack, await pinOf(this.knowledge, pack));
+      return done({ outcome: 'started', run: await this.wireRun(t, row, []), recipe: await this.contentFor(t, row, pack, pack.recipe, []) }, row.runId);   // a new run has no amendments
     });
   }
-  private createRun(pack: RecipePack): RunRow {
+  /** `pin`: the run keeps this release for its whole life; a newer release never changes it. */
+  private async createRun(t: Tx, meta: Meta, pack: RecipePack, pin: Pin): Promise<RunItem> {
     const runId = this.newId('run'), r = pack.recipe;
-    const ss = Object.fromEntries(r.steps.map((s) => [s.stepId, 'NOT_STARTED'])), us = Object.fromEntries(r.uses.map((u) => [u.useId, 'UNADDED']));
+    if (!(await t.fixed(K.pack(pack.packHash)))) t.put(K.pack(pack.packHash), { recipeId: r.recipeId, pack });   // the run stays pinned to its pack across deploys
     // ponytail: no release records in M1, so every run is ENGINEERING; COOK fails closed in the engine (B11).
-    this.store.run(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, 'ENGINEERING', 'ACTIVE', 0, 1, 0, NULL, ?, ?, ?)`,
-      runId, this.kitchenId, r.recipeId, pack.packHash, this.epoch(), JSON.stringify(ss), JSON.stringify(us), this.now());
-    this.store.run('INSERT INTO run_versions VALUES (?, 1, ?, ?)', runId, JSON.stringify(r), hash(r));
-    return this.runRow(runId)!;
+    const row: RunItem = {
+      runId, recipeId: r.recipeId, packHash: pack.packHash, epoch: meta.epoch, mode: 'ENGINEERING', status: 'ACTIVE', revision: 0, version: 1, appliedRescueCount: 0,
+      latestEvaluationId: null, reservedEvaluationId: null, stepStatus: Object.fromEntries(r.steps.map((s) => [s.stepId, 'NOT_STARTED'])),
+      useStatus: Object.fromEntries(r.uses.map((u) => [u.useId, 'UNADDED'])), progressCount: 0, createdAt: this.now(),
+      knowledge: pin, unavailableKinds: [],
+    };
+    t.put(K.run(runId), row);
+    t.put(K.version(runId, 1), { recipe: r, hash: hash(r) });
+    meta.activeRunId = runId;
+    return (await this.runRow(t, runId))!;
   }
 
   // ---------- get_active_recipe (read-only; the reconciliation read) ----------
   getActiveRecipe(input: { runId?: string; commandId?: string; evaluationId?: string } = {}) {
-    const row = this.activeRow();
-    const out: {
-      run: WireRun | null; recipe: RecipeContent | null; latestEvaluation: RescueEvaluation | null;
-      command?: { commandId: Id; receipt: 'NONE' | 'PENDING' | 'DONE' | 'INTERRUPTED'; code: string | null; status: 'applied' | 'appliedOther' | 'notApplied' | 'unknown' | 'runReplaced'; amendmentId?: Id };
-    } = { run: null, recipe: null, latestEvaluation: null };
-    if (row) {
-      const pack = this.pack(row.pack_hash);
-      out.run = this.wireRun(row);
-      out.recipe = recipeContent(this.recipeAt(row.run_id, row.version), this.content.vocab, pack, this.recipeAt(row.run_id, 1), this.content.patterns);
-      out.latestEvaluation = row.latest_evaluation_id ? this.wireEvaluation(row.latest_evaluation_id) : null;
-    }
-    if (input.commandId) out.command = this.commandOutcome(input.commandId, input.runId, input.evaluationId);
-    return out;
+    return this.tx(async (t, meta) => {
+      const row = await this.activeRow(t, meta);
+      const out: {
+        run: WireRun | null; recipe: RecipeContent | null; latestEvaluation: RescueEvaluation | null;
+        command?: { commandId: Id; receipt: 'NONE' | 'PENDING' | 'DONE' | 'INTERRUPTED'; code: string | null; status: 'applied' | 'appliedOther' | 'notApplied' | 'unknown' | 'runReplaced'; amendmentId?: Id };
+      } = { run: null, recipe: null, latestEvaluation: null };
+      if (row) {
+        const pack = await this.pack(t, row.packHash), ams = await this.amendmentsOf(t, row.runId);
+        out.run = await this.wireRun(t, row, ams);
+        out.recipe = await this.contentFor(t, row, pack, await this.recipeAt(t, row.runId, row.version), ams);
+        out.latestEvaluation = row.latestEvaluationId ? await this.wireEvaluationIn(t, row.latestEvaluationId) : null;
+      }
+      if (input.commandId) out.command = await this.commandOutcomeIn(t, meta, input.commandId, input.runId, input.evaluationId);
+      return out;
+    });
   }
 
   /**
    * ESOD §4.2h: RUN_REPLACED → APPLIED_THIS → APPLIED_OTHER → NOT_APPLIED (authoritative only) → UNKNOWN.
    * With several changes per run (ENGINE_SEMANTICS 2), APPLIED_OTHER means the same evaluation was applied by another command.
    */
-  commandOutcome(commandId: string, runId?: string, evaluationId?: string) {
-    const rc = this.store.get<{ run_id: string | null; state: string; result_json: string | null }>('SELECT run_id, state, result_json FROM receipts WHERE kitchen_id = ? AND command_id = ?', this.kitchenId, commandId);
-    const receipt = (rc?.state ?? 'NONE') as 'NONE' | 'PENDING' | 'DONE' | 'INTERRUPTED';
-    const code = rc?.result_json ? ((JSON.parse(rc.result_json) as { outcome?: string; code?: string }).code ?? (JSON.parse(rc.result_json) as { outcome?: string }).outcome?.toUpperCase() ?? null) : null;
+  commandOutcome(commandId: string, runId?: string, evaluationId?: string) { return this.tx((t, meta) => this.commandOutcomeIn(t, meta, commandId, runId, evaluationId)); }
+  private async commandOutcomeIn(t: Tx, meta: Meta, commandId: string, runId?: string, evaluationId?: string) {
+    const rc = await t.get<ReceiptItem>(K.receipt(commandId));
+    const receipt = (rc ? this.receiptState(rc) : 'NONE') as 'NONE' | 'PENDING' | 'DONE' | 'INTERRUPTED';
+    const result = rc?.result as { outcome?: string; code?: string } | null | undefined;
+    const code = result ? (result.code ?? result.outcome?.toUpperCase() ?? null) : null;
     const base = { commandId, receipt, code };
-    const cmdRun = rc?.run_id ?? runId;
-    const run = cmdRun ? this.runRow(cmdRun) : undefined;
-    if (run && (run.status === 'ARCHIVED' || run.epoch !== this.epoch())) return { ...base, status: 'runReplaced' as const };
-    const mine = this.store.get<Row>('SELECT amendment_id FROM amendments WHERE command_id = ?', commandId);
-    if (mine) return { ...base, status: 'applied' as const, amendmentId: mine.amendment_id as string };
-    const other = evaluationId ? this.store.get<Row>('SELECT amendment_id FROM amendments WHERE evaluation_id = ? AND command_id <> ?', evaluationId, commandId) : undefined;
-    if (other) return { ...base, status: 'appliedOther' as const, amendmentId: other.amendment_id as string };
+    const cmdRun = rc?.runId ?? runId;
+    const run = cmdRun ? await this.runRow(t, cmdRun) : undefined;
+    if (run && (run.status === 'ARCHIVED' || run.epoch !== meta.epoch)) return { ...base, status: 'runReplaced' as const };
+    const mine = await t.get<{ amendmentId: string }>(K.byCommand(commandId));
+    if (mine) return { ...base, status: 'applied' as const, amendmentId: mine.amendmentId };
+    const other = evaluationId ? await t.get<{ amendmentId: string; commandId: string }>(K.byEvaluation(evaluationId)) : undefined;
+    if (other && other.commandId !== commandId) return { ...base, status: 'appliedOther' as const, amendmentId: other.amendmentId };
     if (receipt === 'DONE' || receipt === 'INTERRUPTED') return { ...base, status: 'notApplied' as const };
     return { ...base, status: 'unknown' as const };
   }
@@ -286,30 +355,29 @@ export class Service {
   // ---------- record_progress ----------
   recordProgress(input: { commandId?: string; runId: string; epoch: number; expectedRevision?: number } & ProgressAction) {
     type Recorded = { outcome: 'recorded'; code: 'PROGRESS_RECORDED' | 'ALREADY_RECORDED'; run: WireRun };
-    return this.store.tx((): Replayable<Recorded> => {
-      const gate = this.receiptGate<Recorded>('record_progress', input);
+    return this.tx(async (t, meta): Promise<Replayable<Recorded>> => {
+      const gate = await this.receiptGate<Recorded>(t, 'record_progress', input);
       if (gate) return gate;
-      const done = (res: Recorded | Rejected) => { this.writeReceipt('record_progress', input, input.runId ?? null, 'DONE', res); return res; };
-      if (typeof input.expectedRevision !== 'number') return done(this.reject('INVALID_COMMAND'));
-      const row = this.checkRun(input);
+      const done = async (res: Recorded | Rejected) => { await this.writeReceipt(t, 'record_progress', input, input.runId ?? null, 'DONE', res); return res; };
+      if (typeof input.expectedRevision !== 'number') return done(await this.reject(t, 'INVALID_COMMAND'));
+      const row = await this.checkRun(t, meta, input);
       if ('outcome' in row) return done(row);
-      if (row.revision !== input.expectedRevision) return done(this.reject('STALE_STATE', row));
-      const snap = this.snapshot(row);
+      if (row.revision !== input.expectedRevision) return done(await this.reject(t, 'STALE_STATE', row));
+      const snap = await this.snapshot(t, row);
       const res = applyProgress(snap.recipe, snap.stepStatus, snap.useStatus, input);
-      if (!res.ok) return done(this.reject(res.code, row));
-      if (!res.changed) return done({ outcome: 'recorded', code: 'ALREADY_RECORDED', run: this.wireRun(row) });
-      this.commitProgress(row, res.stepStatus, res.useStatus, input);
-      return done({ outcome: 'recorded', code: 'PROGRESS_RECORDED', run: this.wireRun(this.runRow(row.run_id)!) });
+      if (!res.ok) return done(await this.reject(t, res.code, row));
+      if (!res.changed) return done({ outcome: 'recorded', code: 'ALREADY_RECORDED', run: await this.wireRun(t, row) });
+      await this.commitProgress(t, meta, row, res.stepStatus, res.useStatus, input);
+      return done({ outcome: 'recorded', code: 'PROGRESS_RECORDED', run: await this.wireRun(t, (await this.runRow(t, row.runId))!) });
     });
   }
-  private commitProgress(row: RunRow, ss: Record<Id, StepStatus>, us: Record<Id, UseStatus>, a: ProgressAction) {
-    const recipe = this.recipeAt(row.run_id, row.version);
+  private async commitProgress(t: Tx, meta: Meta, row: RunItem, ss: Record<Id, StepStatus>, us: Record<Id, UseStatus>, a: ProgressAction) {
+    const recipe = await this.recipeAt(t, row.runId, row.version);
     const finished = recipe.steps.every((s) => ss[s.stepId] === 'COMPLETED');
-    const seq = (this.store.get<{ n: number }>('SELECT COUNT(*) AS n FROM progress_events WHERE run_id = ?', row.run_id)!.n) + 1;
-    this.store.run('UPDATE runs SET step_status = ?, use_status = ?, revision = revision + 1, status = ? WHERE run_id = ?',
-      JSON.stringify(ss), JSON.stringify(us), finished ? 'FINISHED' : 'ACTIVE', row.run_id);
-    this.store.run('INSERT INTO progress_events VALUES (?, ?, ?, ?, ?)', row.run_id, seq,
-      JSON.stringify({ stepId: a.stepId, progress: a.progress, addedUseIds: a.addedUseIds ?? [], partialUseIds: a.partialUseIds ?? [] }), row.revision + 1, this.now());
+    const seq = row.progressCount + 1;
+    t.put(K.run(row.runId), { ...row, stepStatus: ss, useStatus: us, revision: row.revision + 1, status: finished ? 'FINISHED' : 'ACTIVE', progressCount: seq });
+    if (finished && meta.activeRunId === row.runId) meta.activeRunId = null;
+    t.put(K.progress(row.runId, seq), { action: { stepId: a.stepId, progress: a.progress, addedUseIds: a.addedUseIds ?? [], partialUseIds: a.partialUseIds ?? [] }, revisionAfter: row.revision + 1, at: this.now() });
   }
 
   // ---------- evaluate_rescue (reserve → compute → publish) ----------
@@ -318,38 +386,41 @@ export class Service {
     utterance?: { text: string; channel: 'voice' | 'typed' | 'tapped' }; missingIngredientId?: string; proposedKindIds?: string[];
     answers?: { questionId: string; value: 'yes' | 'no' }[]; previousEvaluationId?: string;
   }): Promise<Replayable<RescueEvaluation>> {
-    const reserved = this.store.tx((): Replayable<RescueEvaluation> | { row: RunRow; evaluationId: string } => {
-      const gate = this.receiptGate<RescueEvaluation>('evaluate_rescue', input);
+    const reserved = await this.tx(async (t, meta): Promise<Replayable<RescueEvaluation> | { row: RunItem; evaluationId: string; snap: RunSnapshot; pack: RecipePack; stored: StoredRequest | null }> => {
+      const gate = await this.receiptGate<RescueEvaluation>(t, 'evaluate_rescue', input);
       if (gate) return gate;
-      const fail = (r: Rejected) => { this.writeReceipt('evaluate_rescue', input, input.runId ?? null, 'DONE', r); return r; };
-      if (typeof input.expectedRevision !== 'number') return fail(this.reject('INVALID_COMMAND'));
-      const row = this.checkRun(input);
+      const fail = async (r: Rejected) => { await this.writeReceipt(t, 'evaluate_rescue', input, input.runId ?? null, 'DONE', r); return r; };
+      if (typeof input.expectedRevision !== 'number') return fail(await this.reject(t, 'INVALID_COMMAND'));
+      const row = await this.checkRun(t, meta, input);
       if ('outcome' in row) return fail(row);
-      if (row.revision !== input.expectedRevision) return fail(this.reject('STALE_STATE', row));
+      if (row.revision !== input.expectedRevision) return fail(await this.reject(t, 'STALE_STATE', row));
       const evaluationId = this.newId('ev');
-      this.writeReceipt('evaluate_rescue', input, row.run_id, 'PENDING', null);
-      this.store.run(`UPDATE evaluations SET state = 'SUPERSEDED' WHERE run_id = ? AND state = 'PENDING'`, row.run_id);
-      this.store.run(`INSERT INTO evaluations(evaluation_id, run_id, base_revision, version, state, request_json, at) VALUES (?, ?, ?, ?, 'PENDING', '{}', ?)`,
-        evaluationId, row.run_id, row.revision, row.version, this.now());
-      return { row, evaluationId };
+      await this.writeReceipt(t, 'evaluate_rescue', input, row.runId, 'PENDING', null);
+      if (row.reservedEvaluationId) {   // at most one PENDING per run: a newer check supersedes it
+        const prev = await t.get<EvalItem>(K.evaluation(row.reservedEvaluationId));
+        if (prev?.state === 'PENDING') t.put(K.evaluation(prev.evaluationId), { ...prev, state: 'SUPERSEDED' });
+      }
+      t.put(K.evaluation(evaluationId), { evaluationId, runId: row.runId, baseRevision: row.revision, version: row.version, state: 'PENDING', request: null, result: null, interpretation: null, at: this.now(), owner: this.kv.owner } satisfies EvalItem);
+      t.put(K.run(row.runId), { ...row, reservedEvaluationId: evaluationId });
+      let stored: StoredRequest | null = null;
+      if (input.previousEvaluationId) {
+        const prev = await t.get<EvalItem>(K.evaluation(input.previousEvaluationId));
+        if (prev && prev.runId === row.runId && prev.request) stored = prev.request;
+      }
+      return { row, evaluationId, snap: await this.snapshot(t, row), pack: await this.pack(t, row.packHash), stored };
     });
     if (!('evaluationId' in reserved)) return reserved;
-    const { row, evaluationId } = reserved;
-    const snap = this.snapshot(row);
-    const pack = this.pack(row.pack_hash);
+    const { row, evaluationId, snap, pack, stored } = reserved;
+    const known = await this.known(pack);   // the run's pinned release (cached per process); never the ACTIVE one
+    const v = known.content?.vocab ?? NO_VOCAB;
 
     // compute (outside any transaction; at most one interpreter call)
-    let stored: StoredRequest | null = null;
-    if (input.previousEvaluationId) {
-      const prev = this.store.get<EvalRow>('SELECT * FROM evaluations WHERE evaluation_id = ? AND run_id = ?', input.previousEvaluationId, row.run_id);
-      if (prev && prev.request_json !== '{}') stored = JSON.parse(prev.request_json) as StoredRequest;
-    }
     let missing = input.missingIngredientId ?? null, proposed = input.proposedKindIds ?? null, interpretation: string | null = null;
     const notices: RescueRequest['notices'] = [];
     if (!missing && input.utterance?.text) {
       const ctx = {
         ingredients: snap.recipe.ingredients.map((i) => ({ id: i.ingredientId, name: i.name })),
-        kinds: this.content.vocab.kinds.map((k) => ({ id: k.kindId, label: k.label, aliases: [...new Set([...k.aliases, k.short])] })),   // the short word is how a cook refers to it ("the cream"), not an identity
+        kinds: v.kinds.map((k) => ({ id: k.kindId, label: k.label, aliases: [...new Set([...k.aliases, k.short])] })),   // the short word is how a cook refers to it ("the cream"), not an identity
       };
       const out = await this.interpreter.interpret(input.utterance.text, ctx);
       interpretation = out.summary;
@@ -365,48 +436,53 @@ export class Service {
       answers: (input.answers ?? []).map((a) => ({ questionId: a.questionId, choiceId: a.value === 'yes' ? 'ENOUGH' : 'NOT_ENOUGH' })),
     };
     let res: EvaluationResult | null = null, error: string | null = null;
-    try { res = evaluate(pack, this.content.vocab, snap, request, false); } catch (e) { error = (e as Error).message; }
+    try {
+      res = known.content ? evaluate(pack, v, snap, request, false, rebindOf(known.content)) : knowledgeUnavailable(pack, snap, request, known.why ?? 'unavailable');
+    } catch (e) { error = (e as Error).message; }
     // a refusal says why: engine facts first, then (at most one call) words for them, checked; the decision never changes
     let explained: Parameters<typeof rescueEvaluation>[0]['explained'];
     if (res?.status === 'REFUSED' && res.refusal) {
-      const why = refusalWhy({ pack, patterns: this.content.patterns, v: this.content.vocab }, res, request.proposedKindIds);
-      const said = await explain(this.explainer, input.utterance?.channel === 'tapped' ? null : input.utterance?.text ?? null, why, this.content.vocab);
+      const why = refusalWhy({ pack: whyPack(pack, snap.recipe, res), patterns: known.content?.patterns ?? [], v }, res, request.proposedKindIds);
+      const said = await explain(this.explainer, input.utterance?.channel === 'tapped' ? null : input.utterance?.text ?? null, why, v);
       explained = { why, answer: { text: said.text, source: said.source }, note: `${said.source}${said.rejected ? ` (${this.explainer.mode} answer not used: ${said.rejected})` : ''}` };
     }
 
     // publish
-    return this.store.tx(() => {
-      const now = this.runRow(row.run_id)!;
-      const newer = this.store.get<Row>(`SELECT evaluation_id FROM evaluations WHERE run_id = ? AND rowid > (SELECT rowid FROM evaluations WHERE evaluation_id = ?)`, row.run_id, evaluationId);
+    return this.tx(async (t, meta) => {
+      const now = (await this.runRow(t, row.runId))!;
+      const ev = (await t.get<EvalItem>(K.evaluation(evaluationId)))!;
+      const newer = now.reservedEvaluationId !== evaluationId;
       let state = 'PUBLISHED';
       if (error || !res) state = 'FAILED';
-      else if (now.status !== 'ACTIVE' || now.epoch !== row.epoch) state = 'INTERRUPTED';
+      else if (now.status !== 'ACTIVE' || now.epoch !== row.epoch || now.epoch !== meta.epoch) state = 'INTERRUPTED';
       else if (now.revision !== row.revision) state = 'STALE';
       else if (newer) state = 'SUPERSEDED';
+      const storedRequest: StoredRequest = { request, utterance: input.utterance ?? null };
       if (state === 'FAILED') {
-        const r = this.reject('INTERNAL', now, `${MESSAGES.INTERNAL} (${error})`);
-        this.store.run(`UPDATE evaluations SET state = 'FAILED', request_json = ? WHERE evaluation_id = ?`, JSON.stringify({ request, utterance: input.utterance ?? null }), evaluationId);
-        this.writeReceipt('evaluate_rescue', input, row.run_id, 'DONE', r);
+        const r = await this.reject(t, 'INTERNAL', now, `${MESSAGES.INTERNAL} (${error})`);
+        t.put(K.evaluation(evaluationId), { ...ev, state: 'FAILED', request: storedRequest });
+        await this.writeReceipt(t, 'evaluate_rescue', input, row.runId, 'DONE', r);
         return r as Replayable<RescueEvaluation>;
       }
       const actionable = state === 'PUBLISHED' && res!.status === 'CANDIDATES';
-      const wire = rescueEvaluation({ evaluationId, runId: row.run_id, baseRevision: row.revision, actionable, res: res!, snapRecipe: snap.recipe, v: this.content.vocab, stepStatus: snap.stepStatus, mode: row.mode, interpretationSummary: interpretation, explained });
-      this.store.run('UPDATE evaluations SET state = ?, request_json = ?, result_json = ?, interpretation = ? WHERE evaluation_id = ?',
-        state, JSON.stringify({ request, utterance: input.utterance ?? null } satisfies StoredRequest), JSON.stringify({ engine: res, wire }), interpretation, evaluationId);
-      if (state === 'PUBLISHED') this.store.run('UPDATE runs SET latest_evaluation_id = ? WHERE run_id = ?', evaluationId, row.run_id);
-      this.writeReceipt('evaluate_rescue', input, row.run_id, 'DONE', wire);
+      const wire = rescueEvaluation({ evaluationId, runId: row.runId, baseRevision: row.revision, actionable, res: res!, snapRecipe: snap.recipe, v, stepStatus: snap.stepStatus, mode: row.mode, interpretationSummary: interpretation, explained,
+        basis: { revision: row.revision, version: row.version, knowledgeReleaseId: known.pin.releaseId, knowledgeBasis: known.pin.basis } });
+      t.put(K.evaluation(evaluationId), { ...ev, state, request: storedRequest, result: { engine: res!, wire }, interpretation });
+      if (state === 'PUBLISHED') t.put(K.run(row.runId), { ...now, latestEvaluationId: evaluationId });
+      await this.writeReceipt(t, 'evaluate_rescue', input, row.runId, 'DONE', wire);
       return wire;
     });
   }
 
   /** Stored evaluation with `actionable` recomputed against the current run (never trusts an old flag). */
-  wireEvaluation(evaluationId: string): RescueEvaluation | null {
-    const ev = this.store.get<EvalRow>('SELECT * FROM evaluations WHERE evaluation_id = ?', evaluationId);
-    if (!ev?.result_json) return null;
-    const run = this.runRow(ev.run_id)!;
-    const { wire } = JSON.parse(ev.result_json) as { wire: RescueEvaluation };
-    const actionable = ev.state === 'PUBLISHED' && run.status === 'ACTIVE' && run.latest_evaluation_id === evaluationId
-      && run.revision === ev.base_revision && run.applied_rescue_count < MAX_CHANGES_PER_RUN && wire.outcome === 'proposal';
+  wireEvaluation(evaluationId: string) { return this.tx((t) => this.wireEvaluationIn(t, evaluationId)); }
+  private async wireEvaluationIn(t: Tx, evaluationId: string): Promise<RescueEvaluation | null> {
+    const ev = await t.get<EvalItem>(K.evaluation(evaluationId));
+    if (!ev?.result) return null;
+    const run = (await this.runRow(t, ev.runId))!;
+    const wire = structuredClone(ev.result.wire);
+    const actionable = ev.state === 'PUBLISHED' && run.status === 'ACTIVE' && run.latestEvaluationId === evaluationId
+      && run.revision === ev.baseRevision && run.appliedRescueCount < MAX_CHANGES_PER_RUN && wire.outcome === 'proposal';
     if (wire.outcome === 'proposal') {
       wire.candidates = wire.candidates.map((c) => ({ ...c, applicable: actionable ? { kind: 'yes' } : { kind: 'no', reason: 'stale', message: 'Your progress changed since this was checked. Check again.' } }));
     }
@@ -417,105 +493,105 @@ export class Service {
    * Text the speech route may read aloud: only what this service rendered (an evaluation's authored speech, or a step).
    * "Change applied." is said only for an amendment this run actually holds, so it is never spoken before the server confirms.
    */
-  speechText(ref: { evaluationId?: string; runId?: string; stepId?: string; amendmentId?: string; next?: boolean }): string | null {
-    if (ref.evaluationId) return this.wireEvaluation(ref.evaluationId)?.speech.text ?? null;
-    const row = ref.runId ? this.runRow(ref.runId) : undefined;
-    if (!row || !ref.stepId) return null;
-    if (ref.amendmentId && !this.store.get('SELECT 1 FROM amendments WHERE amendment_id = ? AND run_id = ?', ref.amendmentId, row.run_id)) return null;
-    const steps = this.wireRun(row).steps, i = steps.findIndex((s) => s.stepId === ref.stepId);
-    return i < 0 ? null : `${ref.amendmentId ? 'Change applied. ' : ref.next ? 'Next: ' : ''}Step ${i + 1}. ${steps[i].effectiveText}`;
+  speechText(ref: { evaluationId?: string; runId?: string; stepId?: string; amendmentId?: string; next?: boolean }): Promise<string | null> {
+    return this.tx(async (t) => {
+      if (ref.evaluationId) return (await this.wireEvaluationIn(t, ref.evaluationId))?.speech.text ?? null;
+      const row = ref.runId ? await this.runRow(t, ref.runId) : undefined;
+      if (!row || !ref.stepId) return null;
+      if (ref.amendmentId && !(await this.amendmentsOf(t, row.runId)).some((a) => a.amendmentId === ref.amendmentId)) return null;
+      const steps = (await this.wireRun(t, row)).steps, i = steps.findIndex((s) => s.stepId === ref.stepId);
+      return i < 0 ? null : `${ref.amendmentId ? 'Change applied. ' : ref.next ? 'Next: ' : ''}Step ${i + 1}. ${steps[i].effectiveText}`;
+    });
   }
 
-  // ---------- apply_amendment (one BEGIN IMMEDIATE transaction; receipt committed with the amendment) ----------
+  // ---------- apply_amendment (one workspace transaction; receipt committed with the amendment) ----------
   applyAmendment(input: { commandId?: string; runId: string; epoch: number; expectedRevision?: number; evaluationId: string; candidateId: string; planId: string; accepted?: boolean }) {
     type Applied = { outcome: 'applied'; amendment: WireAmendment; run: WireRun; resume: { stepId: Id; text: string } };
-    return this.store.tx((): Replayable<Applied> => {
-      const gate = this.receiptGate<Applied>('apply_amendment', input);
+    return this.tx(async (t, meta): Promise<Replayable<Applied>> => {
+      const gate = await this.receiptGate<Applied>(t, 'apply_amendment', input);
       if (gate) return gate;
-      const done = (res: Applied | Rejected) => { this.writeReceipt('apply_amendment', input, input.runId ?? null, 'DONE', res); return res; };
-      if (typeof input.expectedRevision !== 'number') return done(this.reject('INVALID_COMMAND'));
-      if (input.accepted !== true) return done(this.reject('ACCEPTANCE_REQUIRED'));
-      const row = this.checkRun(input);
+      const done = async (res: Applied | Rejected) => { await this.writeReceipt(t, 'apply_amendment', input, input.runId ?? null, 'DONE', res); return res; };
+      if (typeof input.expectedRevision !== 'number') return done(await this.reject(t, 'INVALID_COMMAND'));
+      if (input.accepted !== true) return done(await this.reject(t, 'ACCEPTANCE_REQUIRED'));
+      const row = await this.checkRun(t, meta, input);
       if ('outcome' in row) return done(row);
-      if (row.revision !== input.expectedRevision) return done(this.reject('STALE_STATE', row));
-      const ev = this.store.get<EvalRow>('SELECT * FROM evaluations WHERE evaluation_id = ?', input.evaluationId);
-      if (!ev || ev.run_id !== row.run_id || row.latest_evaluation_id !== ev.evaluation_id) return done(this.reject('NOT_LATEST_EVALUATION', row));
-      const stored = JSON.parse(ev.result_json!) as { engine: EvaluationResult };
-      if (ev.state !== 'PUBLISHED' || stored.engine.status !== 'CANDIDATES') return done(this.reject('NOT_ACTIONABLE', row));
-      if (ev.base_revision !== row.revision) return done(this.reject('STALE_STATE', row));
-      if (row.applied_rescue_count >= MAX_CHANGES_PER_RUN) return done(this.reject('SUCCESSIVE_RESCUE_UNSUPPORTED', row));
-      const shown = stored.engine.candidates.find((c) => c.candidateId === input.candidateId);
-      if (!shown || shown.planHash !== input.planId) return done(this.reject('PLAN_MISMATCH', row));
+      if (row.revision !== input.expectedRevision) return done(await this.reject(t, 'STALE_STATE', row));
+      const ev = await t.get<EvalItem>(K.evaluation(input.evaluationId));
+      if (!ev || ev.runId !== row.runId || row.latestEvaluationId !== ev.evaluationId) return done(await this.reject(t, 'NOT_LATEST_EVALUATION', row));
+      if (ev.state !== 'PUBLISHED' || ev.result?.engine.status !== 'CANDIDATES') return done(await this.reject(t, 'NOT_ACTIONABLE', row));
+      if (ev.baseRevision !== row.revision) return done(await this.reject(t, 'STALE_STATE', row));
+      if (row.appliedRescueCount >= MAX_CHANGES_PER_RUN) return done(await this.reject(t, 'SUCCESSIVE_RESCUE_UNSUPPORTED', row));
+      const shown = ev.result.engine.candidates.find((c) => c.candidateId === input.candidateId);
+      if (!shown || shown.planHash !== input.planId) return done(await this.reject(t, 'PLAN_MISMATCH', row));
       // re-evaluate on the current snapshot with the stored request; never apply a stale plan
-      const snap = this.snapshot(row);
-      const { request } = JSON.parse(ev.request_json) as StoredRequest;
-      const again = evaluate(this.pack(row.pack_hash), this.content.vocab, snap, request, false);
+      const snap = await this.snapshot(t, row), pack = await this.pack(t, row.packHash), known = await this.known(pack);
+      if (!known.content) return done(await this.reject(t, 'KNOWLEDGE_UNAVAILABLE', row));
+      // re-evaluate on the current snapshot with the stored request and the run's pinned release; never apply a stale plan
+      const again = evaluate(pack, known.content.vocab, snap, ev.request!.request, false, rebindOf(known.content));
       const fresh = again.status === 'CANDIDATES' ? again.candidates.find((c) => c.candidateId === input.candidateId) : undefined;
-      if (!fresh || fresh.planHash !== shown.planHash) return done(this.reject('PLAN_CHANGED', row));
+      if (!fresh || fresh.planHash !== shown.planHash) return done(await this.reject(t, 'PLAN_CHANGED', row));
       const amendmentId = this.newId('am');
       const changed = fresh.changes.filter((c) => c.kind !== 'UNCHANGED').map((c) => c.stepId);
-      this.store.run('INSERT INTO run_versions VALUES (?, ?, ?, ?)', row.run_id, row.version + 1, JSON.stringify(fresh.resultRecipe), hash(fresh.resultRecipe));
+      t.put(K.version(row.runId, row.version + 1), { recipe: fresh.resultRecipe, hash: hash(fresh.resultRecipe) });
       // statuses for new uses start UNADDED; nothing is completed by applying (B21)
       const us = { ...snap.useStatus };
       for (const u of fresh.resultRecipe.uses) us[u.useId] ??= 'UNADDED';
-      this.store.run('UPDATE runs SET version = version + 1, revision = revision + 1, applied_rescue_count = applied_rescue_count + 1, use_status = ? WHERE run_id = ?', JSON.stringify(us), row.run_id);
-      this.store.run('INSERT INTO amendments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', amendmentId, row.run_id, ev.evaluation_id, fresh.candidateId, fresh.planHash,
-        input.commandId!, row.version, row.version + 1, row.revision + 1, JSON.stringify(changed), this.now());
-      const after = this.runRow(row.run_id)!;
-      return done({ outcome: 'applied', amendment: this.wireAmendment(this.store.get<Row>('SELECT * FROM amendments WHERE amendment_id = ?', amendmentId)!), run: this.wireRun(after), resume: { stepId: fresh.resume.stepId, text: fresh.resume.text } });
+      const missing = ev.request!.request.missingIngredientId, kind = missing ? snap.recipe.ingredients.find((i) => i.ingredientId === missing)?.kind?.kindId : undefined;
+      t.put(K.run(row.runId), { ...row, version: row.version + 1, revision: row.revision + 1, appliedRescueCount: row.appliedRescueCount + 1, useStatus: us,
+        unavailableKinds: [...new Set([...(row.unavailableKinds ?? []), ...(kind ? [kind] : [])])] });
+      const earlier = await this.amendmentsOf(t, row.runId);
+      const am: AmendmentItem = { amendmentId, runId: row.runId, evaluationId: ev.evaluationId, candidateId: fresh.candidateId, planHash: fresh.planHash,
+        commandId: input.commandId!, fromVersion: row.version, toVersion: row.version + 1, revisionAfter: row.revision + 1, changedStepIds: changed, at: this.now(),
+        title: fresh.patternTitle, origin: fresh.origin, knowledgeReleaseId: known.pin.releaseId, missingIngredientId: missing ?? null,
+        dependsOn: dependsOn(snap.recipe, fresh.ops, changed, earlier) };
+      t.put(K.amendment(row.runId, row.version + 1), am);
+      t.put(K.byCommand(input.commandId!), { amendmentId });
+      t.put(K.byEvaluation(ev.evaluationId), { amendmentId, commandId: input.commandId! });   // one amendment per evaluation (it must not exist yet)
+      const after = (await this.runRow(t, row.runId))!;
+      return done({ outcome: 'applied', amendment: this.wireAmendment(am), run: await this.wireRun(t, after), resume: { stepId: fresh.resume.stepId, text: fresh.resume.text } });
     });
   }
 
   // ---------- import_recipe (owner amendment 2026-10-05): a draft, exactly as the companion's import makes one ----------
   /**
-   * Text, or the opaque sourceDocId an earlier upload returned (never a path or URL). The existing pipeline runs (one
-   * extraction and one swap analysis, ledger-capped, never retried); the result is a draft that nobody has saved,
-   * reviewed or released. Retrying the same commandId replays the stored result and never starts a second extraction.
+   * Text, or the opaque sourceDocId an earlier upload returned (never a path or URL). Returns once the import job is durable
+   * (`importing`, or `failed` if the source can't be read at all); the existing pipeline then runs in the background (one
+   * extraction and one swap analysis, ledger-capped, never retried). The same commandId and source again report the job as
+   * it is now (`importing`, `imported` with the draft, or `failed`), never a second reading. The draft is never saved,
+   * reviewed or released here. (Latency audit 2026-10-11: waiting for the reading held this call open for up to 25 s.)
    */
-  async importRecipe(input: { commandId?: string; source: { kind: 'text'; text: string; title?: string } | { kind: 'upload'; sourceDocId: string } }, authoring: Authoring | undefined, waitMs = 25_000) {
-    type Imported = { outcome: 'imported' | 'importing' | 'failed'; job: unknown; draft: unknown; next: string };
-    const gate = this.store.tx(() => {
-      const g = this.receiptGate<Imported>('import_recipe', input);
-      if (!g) this.writeReceipt('import_recipe', input, null, 'PENDING', null);
+  async importRecipe(input: { commandId?: string; source: { kind: 'text'; text: string; title?: string } | { kind: 'upload'; sourceDocId: string } }, authoring: Authoring | undefined) {
+    type Imported = { outcome: 'imported' | 'importing' | 'needsChoice' | 'failed'; job: ImportJob; draft: unknown; next: string };
+    const gate = await this.tx(async (t) => {
+      const g = await this.receiptGate<Imported>(t, 'import_recipe', input);
+      if (!g) await this.writeReceipt(t, 'import_recipe', input, null, 'PENDING', null);
       return g;
     });
-    if (gate) return gate;
-    const done = (res: Imported | Rejected) => { this.store.tx(() => this.writeReceipt('import_recipe', input, null, 'DONE', res)); return res; };
-    if (!authoring) return done(this.reject('IMPORT_UNAVAILABLE'));
+    // the receipt holds the acceptance; a retry reads the job's current state (still read-only: nothing starts again)
+    if (gate) return gate.outcome === 'importing' && authoring ? { ...await this.importState(authoring, gate.job.id), replayed: true } : gate;
+    const done = async (res: Imported | Rejected) => { await this.tx((t) => this.writeReceipt(t, 'import_recipe', input, null, 'DONE', res)); return res; };
+    if (!authoring) return done(await this.tx((t) => this.reject(t, 'IMPORT_UNAVAILABLE')));
     const r = await authoring.createImport(input.source, `mcp:${input.commandId}`);
-    if (r.status !== 202) return done(this.reject(r.error.code, null, r.error.message));
-    // ponytail: bounded wait so an agent gets the reading in one call; a slower live reading finishes in the companion
-    await Promise.race([authoring.waitForJob(r.job.id), new Promise((ok) => setTimeout(ok, waitMs))]);
-    const { job, draft } = authoring.getImport(r.job.id);
-    const content = draft?.content;
-    return done({
-      outcome: job.state === 'failed' ? 'failed' : job.state === 'queued' || job.state === 'running' ? 'importing' : 'imported',
-      job, draft: draft && {
-        draftId: draft.id, revision: draft.revision, title: content?.title ?? null, saved: false, blockers: draft.blockers.map((b) => b.message),
-        steps: content?.steps.length ?? 0,
-        uses: content?.ingredients.flatMap((i) => i.uses.map((u) => ({
-          ingredient: i.name, step: content.steps.find((s) => s.id === u.stepId)?.ordinal ?? null, swap: u.swap.kind, text: u.swap.text, label: u.swap.label ?? null, analysis: u.analysis?.status ?? null,
-        }))) ?? [],
-      },
-      next: 'This is an unsaved draft. Review it and save it from the companion; importing never saves, reviews or releases a recipe.',
-    });
+    if (r.status !== 202) return done(await this.tx((t) => this.reject(t, r.error.code, null, r.error.message)));
+    return done(importResult(r.job, null));
   }
+  private async importState(authoring: Authoring, jobId: Id) { const { job, draft } = await authoring.getImport(jobId); return importResult(job, draft); }
 
   // ---------- delete_recipe = archive from the Recipe Book (owner amendment 2026-10-05) ----------
   /** Hides one recipe from the book. Runs, receipts, saved versions, packs and sources stay; nothing is physically deleted. */
   archiveRecipe(input: { commandId?: string; recipeId: string; recipeVersionId: string; confirm: boolean }) {
     type Archived = { outcome: 'archived'; recipeId: Id; recipeVersionId: string; kept: string };
-    return this.store.tx((): Replayable<Archived> => {
-      const gate = this.receiptGate<Archived>('delete_recipe', input);
+    return this.tx(async (t, meta): Promise<Replayable<Archived>> => {
+      const gate = await this.receiptGate<Archived>(t, 'delete_recipe', input);
       if (gate) return gate;
-      const done = (res: Archived | Rejected) => { this.writeReceipt('delete_recipe', input, null, 'DONE', res); return res; };
-      if (input.confirm !== true) return done(this.reject('REPLACE_NOT_CONFIRMED', null, 'Removing a recipe from the Recipe Book needs explicit confirmation.'));
-      const entry = this.listRecipes().recipes.find((r) => r.recipeId === input.recipeId);
-      if (!entry) return done(this.reject('RECIPE_NOT_FOUND'));
-      if (entry.currentVersionId !== input.recipeVersionId) return done(this.reject('VERSION_MISMATCH'));
-      const active = this.activeRow();
-      if (active?.recipe_id === input.recipeId) return done(this.reject('RECIPE_IN_USE', active));
-      this.store.run('INSERT INTO archived_recipes VALUES (?, ?, ?, ?)', input.recipeId, input.recipeVersionId, input.commandId!, this.now());
+      const done = async (res: Archived | Rejected) => { await this.writeReceipt(t, 'delete_recipe', input, null, 'DONE', res); return res; };
+      if (input.confirm !== true) return done(await this.reject(t, 'REPLACE_NOT_CONFIRMED', null, 'Removing a recipe from the Recipe Book needs explicit confirmation.'));
+      const entry = (await this.book(t, meta)).recipes.find((r) => r.recipeId === input.recipeId);
+      if (!entry) return done(await this.reject(t, 'RECIPE_NOT_FOUND'));
+      if (entry.currentVersionId !== input.recipeVersionId) return done(await this.reject(t, 'VERSION_MISMATCH'));
+      const active = await this.activeRow(t, meta);
+      if (active?.recipeId === input.recipeId) return done(await this.reject(t, 'RECIPE_IN_USE', active));
+      meta.archived[input.recipeId] = { versionId: input.recipeVersionId, commandId: input.commandId!, at: this.now() };
       return done({ outcome: 'archived', recipeId: input.recipeId, recipeVersionId: input.recipeVersionId,
         kept: 'Removed from the Recipe Book only. Cooking history, receipts, saved versions and source files are kept.' });
     });
@@ -523,58 +599,85 @@ export class Service {
 
   // ---------- test support: start a run at a named fixture scene (tests/support/server.ts and acceptance tests only; no
   // product route reaches it, and it is never an MCP tool) ----------
-  adminReset(fixtureId: string): { ok: true; runId: Id; epoch: number; stateHash: string } | { ok: false; code: string } {
-    const fx = this.content.fixtures.get(fixtureId);
-    if (!fx) return { ok: false, code: 'FIXTURE_NOT_FOUND' };
-    const pack = this.content.packs.get(fx.recipeId);
-    if (!pack) return { ok: false, code: 'RECIPE_NOT_FOUND' };
-    return this.store.tx(() => {
-      this.store.run(`UPDATE runs SET status = 'ARCHIVED' WHERE kitchen_id = ? AND status = 'ACTIVE'`, this.kitchenId);
-      this.store.run('UPDATE kitchens SET epoch = epoch + 1 WHERE kitchen_id = ?', this.kitchenId);
-      let row = this.createRun(pack);
+  async adminReset(fixtureId: string): Promise<{ ok: true; runId: Id; epoch: number; stateHash: string } | { ok: false; code: string }> {
+    const ex = await this.examples();
+    const fx = ex?.fixtures.get(fixtureId);
+    if (!fx) return { ok: false as const, code: 'FIXTURE_NOT_FOUND' };
+    const pack = ex!.packs.get(fx.recipeId);
+    if (!pack) return { ok: false as const, code: 'RECIPE_NOT_FOUND' };
+    return this.tx(async (t, meta) => {
+      const active = await this.activeRow(t, meta);
+      if (active) t.put(K.run(active.runId), { ...active, status: 'ARCHIVED' });
+      meta.activeRunId = null;
+      meta.epoch += 1;
+      let row = await this.createRun(t, meta, pack, { releaseId: ex!.releaseId, basis: 'PINNED' });
       for (const a of fx.actions) {   // fixtures reach only states the product can reach: the same progress path
-        const snap = this.snapshot(row);
+        const snap = await this.snapshot(t, row);
         const res = applyProgress(snap.recipe, snap.stepStatus, snap.useStatus, a);
         if (!res.ok) throw new Error(`fixture ${fixtureId}: ${a.stepId} ${res.code}`);
-        this.commitProgress(row, res.stepStatus, res.useStatus, a);
-        row = this.runRow(row.run_id)!;
+        await this.commitProgress(t, meta, row, res.stepStatus, res.useStatus, a);
+        row = (await this.runRow(t, row.runId))!;
       }
-      const snap = this.snapshot(row);
-      return { ok: true as const, runId: row.run_id, epoch: row.epoch, stateHash: hash({ packHash: row.pack_hash, revision: row.revision, stepStatus: snap.stepStatus, useStatus: snap.useStatus }) };
+      const snap = await this.snapshot(t, row);
+      return { ok: true as const, runId: row.runId, epoch: row.epoch, stateHash: hash({ packHash: row.packHash, revision: row.revision, stepStatus: snap.stepStatus, useStatus: snap.useStatus }) };
     });
   }
 
-  /**
-   * Start over (owner key; HTTP only, never MCP). Archives the whole database first, then clears cooking sessions, proposals,
-   * receipts, Activity and every imported recipe. Kitchen epoch +1, so a stale tab's commands are refused. Approved content
-   * (the owner-authored example recipes) is untouched and stays listed; nothing is restored or replayed.
-   */
-  startOver(archivePath: string) {
-    this.store.db.exec(`VACUUM INTO '${archivePath.replace(/'/g, "''")}'`);   // evidence copy before anything is cleared
-    this.store.tx(() => {
-      for (const t of ['activity', 'receipts', 'amendments', 'evaluations', 'progress_events', 'run_versions', 'runs', 'facts', 'extractions', 'swap_analyses', 'swap_repairs', 'draft_bodies', 'draft_sources', 'import_jobs', 'drafts', 'saved_recipes', 'archived_recipes', 'sources']) this.store.run(`DELETE FROM ${t}`);
-      const keep = [...this.content.packs.values()].map((p) => p.packHash);
-      this.store.run(`DELETE FROM packs WHERE pack_hash NOT IN (${keep.map(() => '?').join(',')})`, ...keep);
-      this.store.run('UPDATE kitchens SET epoch = epoch + 1 WHERE kitchen_id = ?', this.kitchenId);
-    });
-    return { ok: true as const, archivedTo: archivePath };
+  // ---------- activity (real MCP calls, server-recorded; outside workspace transactions) ----------
+  async logActivity(e: { runId: string | null; tool: string; correlationId: string | null; status: string; summary: string; input: unknown; trace: unknown; durationMs: number }) {
+    const pk = wsPk(this.ws), seq = await this.kv.incr({ pk, sk: 'ACTSEQ' });
+    await this.kv.write([{ put: { pk, sk: K.activity(seq), seq, ...e, input: e.input ?? null, trace: e.trace ?? null, at: this.now() } }]);
   }
-
-  // ---------- activity (real MCP calls, server-recorded) ----------
-  logActivity(e: { runId: string | null; tool: string; correlationId: string | null; status: string; summary: string; input: unknown; trace: unknown; durationMs: number }) {
-    this.store.run('INSERT INTO activity(run_id, tool, correlation_id, status, summary, input_json, trace_json, duration_ms, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      e.runId, e.tool, e.correlationId, e.status, e.summary, JSON.stringify(e.input ?? null), e.trace ? JSON.stringify(e.trace) : null, e.durationMs, this.now());
-  }
-  activity(runId?: string, after = 0) {
-    const rows = runId
-      ? this.store.all<Row>('SELECT * FROM activity WHERE run_id = ? AND seq > ? ORDER BY seq', runId, after)
-      : this.store.all<Row>('SELECT * FROM activity WHERE seq > ? ORDER BY seq', after);
-    return rows.map((r) => ({
-      id: `act_${r.seq}`, seq: r.seq as number, channel: 'mcp' as const, name: r.tool as string, correlationId: r.correlation_id as string | null,
-      status: r.status as string, summary: r.summary as string, input: JSON.parse((r.input_json as string) ?? 'null') as unknown,
-      trace: r.trace_json ? (JSON.parse(r.trace_json as string) as unknown) : undefined, durationMs: r.duration_ms as number, at: r.at as string,
+  async activity(runId?: string, after = 0) {
+    const rows = await this.kv.query(wsPk(this.ws), { prefix: 'ACT#', after: after > 0 ? K.activity(after) : undefined });
+    return rows.filter((r) => !runId || r.runId === runId).map((r) => ({
+      id: `act_${r.seq}`, seq: r.seq as number, channel: 'mcp' as const, name: r.tool as string, correlationId: r.correlationId as string | null,
+      status: r.status as string, summary: r.summary as string, input: r.input as unknown,
+      trace: r.trace ? (r.trace as unknown) : undefined, durationMs: r.durationMs as number, at: r.at as string,
     }));
   }
+}
 
-  close() { this.store.close(); }
+/** A refusal's "why" reads the plans for the recipe as it is now: re-bound plans and their coverage replace the frozen ones
+ *  for the target, and uses an accepted change introduced resolve against the current recipe. */
+function whyPack(pack: RecipePack, now: Recipe, res: EvaluationResult): RecipePack {
+  if (!res.rebound) return now === pack.recipe ? pack : { ...pack, recipe: now };
+  const t = res.target?.useId;
+  return { ...pack, recipe: now, coverage: [...pack.coverage.filter((c) => c.targetUseId !== t), ...res.rebound.coverage],
+    bindings: [...pack.bindings.filter((b) => b.targetUseId !== t || b.card), ...res.rebound.bindings] };
+}
+
+/** Which earlier changes this one builds on: it replaces or removes a use one of them introduced, or edits a step one of them
+ *  changed. Read from the recipe's own records (use origins, the amendments' changed steps); bounded by MAX_CHANGES_PER_RUN. */
+export function dependsOn(before: Recipe, ops: import('../contract/types.ts').Op[], changedSteps: Id[], earlier: AmendmentItem[]): NonNullable<AmendmentItem['dependsOn']> {
+  const out: NonNullable<AmendmentItem['dependsOn']> = [];
+  const add = (amendmentId: string, relation: 'REPLACES_INTRODUCED' | 'SHARES_STEP') => { if (!out.some((d) => d.amendmentId === amendmentId && d.relation === relation)) out.push({ amendmentId, relation }); };
+  for (const op of ops) {
+    if (op.op !== 'REPLACE_USE' && op.op !== 'REMOVE_USE') continue;
+    const o = before.uses.find((u) => u.useId === op.useId)?.origin;
+    const a = o && earlier.find((x) => x.fromVersion === o.fromVersion);
+    if (a) add(a.amendmentId, 'REPLACES_INTRODUCED');
+  }
+  for (const a of earlier) if (a.changedStepIds.some((s) => changedSteps.includes(s))) add(a.amendmentId, 'SHARES_STEP');
+  return out;
+}
+
+/** What import_recipe reports for a job: never `imported` before the reading has finished and its draft exists. */
+function importResult(job: ImportJob, draft: WireDraft | null) {
+  const outcome = job.state === 'failed' ? 'failed' as const : job.state === 'needsChoice' ? 'needsChoice' as const : job.state === 'queued' || job.state === 'running' || !draft ? 'importing' as const : 'imported' as const;
+  const content = draft?.content;
+  return {
+    outcome, job, draft: outcome === 'imported' && draft ? {
+      draftId: draft.id, revision: draft.revision, title: content?.title ?? null, saved: false, blockers: draft.blockers.map((b) => b.message),
+      steps: content?.steps.length ?? 0,
+      uses: content?.ingredients.flatMap((i) => i.uses.map((u) => ({
+        ingredient: i.name, step: content.steps.find((s) => s.id === u.stepId)?.ordinal ?? null, swap: u.swap.kind, text: u.swap.text, label: u.swap.label ?? null, analysis: u.analysis?.status ?? null,
+      }))) ?? [],
+    } : null,
+    next: outcome === 'importing'
+      ? 'Reading in the background; nothing is finished yet. Call import_recipe again with the same commandId and source for its current state (that never starts a second reading). The draft will be unsaved: the cook reviews and saves it in the companion.'
+      : outcome === 'needsChoice' ? `The document holds ${job.choices?.length ?? 'several'} recipes (${(job.choices ?? []).map((c) => c.title).join('; ')}); none was read. The cook chooses one in the companion, and only that one is read.`
+      : outcome === 'failed' ? (job.canRetry ? 'Nothing was imported yet. The cook can retry this same import in the companion; nothing that finished is read again.' : 'Nothing was imported. Try a different file or paste the recipe text, with a new commandId.')
+        : 'This is an unsaved draft. Review it and save it from the companion; importing never saves, reviews or releases a recipe.',
+  };
 }

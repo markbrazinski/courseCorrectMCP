@@ -25,8 +25,12 @@ export interface WireUse {
   reviewedFunction: { labels: string[]; reviewId: string; authority: 'MACHINE_CHECKED' | 'OWNER_REVIEWED' } | null;   // R-1: the role table's roles are MACHINE_CHECKED
   swap: WireSwap; sourceRef: null;
   analysis: UseAnalysis | null;   // import review only (drafts and recipe pages); null on cooking responses
+  /** Cooking only: the accepted change this use came in with (2026-10-11), so a cook can name it as missing and see why it's there. */
+  introducedBy?: { amendmentId: Id; title: string | null; replaces: string | null } | null;
 }
-export interface WireIngredient { id: Id; name: string; totalAmount: WireAmount; uses: WireUse[]; sourceRef: null; removedByAmendment: boolean }
+export interface WireIngredient { id: Id; name: string; totalAmount: WireAmount; uses: WireUse[]; sourceRef: null; removedByAmendment: boolean;
+  /** the source's sub-list heading for this line ("For the Makhani Sauce:"); the same ingredient may be listed in two groups */
+  group?: string | null }
 export interface WireStep { id: Id; ordinal: number; title: string; text: string; useIds: Id[]; duration: { seconds: number; display: string; sourceText: string | null } | null; dependsOn: Id[]; sourceRef: null }
 export interface RecipeContent { title: string; meta: string; ingredients: WireIngredient[]; steps: WireStep[]; notes: [] }
 export type StepProgress = 'notStarted' | 'started' | 'partly' | 'done';
@@ -34,11 +38,16 @@ export interface WireRunStep {
   stepId: Id; progress: StepProgress; partialUseIds: Id[]; effectiveText: string; originalText: string | null;
   changedByAmendmentId: Id | null; onHold: null;
 }
-export interface WireAmendment { id: Id; commandId: Id; candidateId: Id; planId: string; changedStepIds: Id[]; appliedAtRunRevision: number; fromVersion: number; toVersion: number }
+export interface WireAmendment { id: Id; commandId: Id; candidateId: Id; planId: string; changedStepIds: Id[]; appliedAtRunRevision: number; fromVersion: number; toVersion: number;
+  /** 2026-10-11: the plan's title, the knowledge release that authorized it, and the earlier changes it builds on */
+  title?: string | null; knowledgeReleaseId?: string | null; dependsOn?: { amendmentId: Id; relation: 'REPLACES_INTRODUCED' | 'SHARES_STEP' }[] }
 export interface WireRun {
   id: Id; recipeId: Id; recipeVersionId: string; epoch: number; revision: number; version: number;
   state: 'active' | 'ended'; mode: 'COOK' | 'ENGINEERING'; contentLabel: string;
   steps: WireRunStep[]; currentStepId: Id | null; appliedAmendments: WireAmendment[]; pendingCommand: null;
+  /** The knowledge release every check in this session uses: PINNED when the recipe was prepared; HASH_MATCH for a recipe saved
+   *  before releases whose content equals a published release; UNPINNED when neither can be established (2026-10-11). */
+  knowledge?: { releaseId: string | null; basis: 'PINNED' | 'HASH_MATCH' | 'UNPINNED' };
 }
 export interface RecipeBookEntry {
   recipeId: Id; currentVersionId: string; title: string; meta: string; sourceLabel: string;
@@ -63,10 +72,13 @@ export type WireRefusal =
   | { kind: 'nothingToChange'; ingredientId: Id; reason: 'allUsesDone' | 'replacedByAmendment'; message: string }
   | { kind: 'rescueLimitReached'; unchanged: string; message: string }
   | { kind: 'earlierChangeConflict'; unchanged: string; message: string }
+  | { kind: 'knowledgeUnavailable'; unchanged: string; message: string }
   | { kind: 'notReleased'; message: string };
 export interface WireInterpretation { missingIngredientId: Id; missingUseIds: Id[]; atStepId: Id; askedAbout: string | null; display: { label: string; value: string }[] }
 export type RescueEvaluation = {
   id: Id; runId: Id; evaluatedAtRunRevision: number; actionable: boolean;
+  /** What this answer was evaluated against (2026-10-11): the run revision and recipe version, and the knowledge release. */
+  basis?: { revision: number; version: number; knowledgeReleaseId: string | null; knowledgeBasis: 'PINNED' | 'HASH_MATCH' | 'UNPINNED' };
   interpretation: WireInterpretation | null;
   speech: { text: string; source: 'engineAuthored'; correspondsTo: Id };
   trace: { interpretation: string | null; deterministic: string | null; explanation: string | null };
@@ -95,7 +107,9 @@ export function wireAmount(a: Amount, u?: IngredientUse): WireAmount {
 const labelsOf = (v: Vocabulary, u: IngredientUse) => u.functions.map((f) => f.label ?? functionLabel(v, f.functionId));
 
 /** `analysis`: add each use's import analysis (Amendment 1); `pending` while the import's swap analysis is still running. */
-export function recipeContent(r: Recipe, v: Vocabulary, pack: RecipePack, v1: Recipe, patterns: Pattern[], analysis?: { pending: boolean }): RecipeContent {
+/** `changeOf`: cooking views, the accepted change that made the version after `fromVersion` (labels uses it introduced). */
+export function recipeContent(r: Recipe, v: Vocabulary, pack: RecipePack, v1: Recipe, patterns: Pattern[], analysis?: { pending: boolean },
+  changeOf?: (fromVersion: number) => { amendmentId: Id; title: string | null } | null): RecipeContent {
   const memo = new Map<Id, ImportPlan | null>();
   const steps: WireStep[] = r.steps.map((s, i) => ({
     id: s.stepId, ordinal: i + 1, title: s.title ?? `Step ${i + 1}`, text: renderStep(r, s),
@@ -104,7 +118,7 @@ export function recipeContent(r: Recipe, v: Vocabulary, pack: RecipePack, v1: Re
   const ingredients: WireIngredient[] = r.ingredients.map((ing) => {
     const uses = r.uses.filter((u) => u.ingredientId === ing.ingredientId);
     return {
-      id: ing.ingredientId, name: ing.name, sourceRef: null,
+      id: ing.ingredientId, name: ing.name, sourceRef: null, group: ing.group ?? null,
       totalAmount: ing.listed.kind === 'UNSPECIFIED' ? derivedTotal(r, uses) : wireAmount(ing.listed),
       removedByAmendment: uses.length === 0 && v1.uses.some((u) => u.ingredientId === ing.ingredientId),
       uses: uses.map((u) => ({
@@ -113,10 +127,18 @@ export function recipeContent(r: Recipe, v: Vocabulary, pack: RecipePack, v1: Re
         reviewedFunction: u.functions.length && u.functions.every((f) => f.prov.status === 'REVIEWED') ? { labels: labelsOf(v, u), reviewId: u.functions[0].prov.ref ?? 'reviewed', authority: u.functions.every((f) => f.prov.by === 'OWNER') ? 'OWNER_REVIEWED' : 'MACHINE_CHECKED' } : null,
         swap: swapOf({ pack, patterns, v }, u.useId), sourceRef: null,
         analysis: analysis ? analysisOf({ pack, patterns, v }, u.useId, analysis.pending, memo) : null,
+        ...(changeOf ? { introducedBy: introducedBy(r, v1, u, changeOf) } : {}),
       })),
     };
   });
   return { title: r.title, meta: r.meta, ingredients, steps, notes: [] };
+}
+
+function introducedBy(r: Recipe, v1: Recipe, u: IngredientUse, changeOf: (fromVersion: number) => { amendmentId: Id; title: string | null } | null) {
+  const c = u.origin ? changeOf(u.origin.fromVersion) : null;
+  if (!c) return null;
+  const was = u.origin!.replacesUseId ? [r, v1].map((x) => x.uses.find((y) => y.useId === u.origin!.replacesUseId)).find(Boolean) : undefined;
+  return { amendmentId: c.amendmentId, title: c.title, replaces: was ? (getIngredient(r, was.ingredientId) ?? getIngredient(v1, was.ingredientId))?.name ?? null : null };
 }
 
 /** Total for an introduced ingredient: exact ADD uses summed; ceilings and qualitative amounts kept separate (never summed). */
@@ -200,7 +222,8 @@ export function wireRefusal(rf: Refusal, res: EvaluationResult, r: Recipe): Wire
     case 'INSUFFICIENT_AVAILABILITY': return { kind: 'missingFacts', unchanged: rf.unchanged, message: rf.message };
     case 'NOTHING_TO_CHANGE': return { kind: 'nothingToChange', ingredientId: rf.ingredientUses[0]?.useId ? r.uses.find((u) => u.useId === rf.ingredientUses[0].useId)!.ingredientId : t?.ingredientId ?? '', reason: rf.reason === 'REPLACED_BY_AMENDMENT' ? 'replacedByAmendment' : 'allUsesDone', message: rf.message };
     case 'SUCCESSIVE_RESCUE_UNSUPPORTED': return { kind: 'rescueLimitReached', unchanged: rf.unchanged, message: rf.message };
-    case 'CONFLICTS_WITH_EARLIER_CHANGE': return { kind: 'earlierChangeConflict', unchanged: rf.unchanged, message: rf.message };
+    case 'CONFLICTS_WITH_EARLIER_CHANGE': case 'REINTRODUCES_UNAVAILABLE': return { kind: 'earlierChangeConflict', unchanged: rf.unchanged, message: rf.message };
+    case 'KNOWLEDGE_UNAVAILABLE': return { kind: 'knowledgeUnavailable', unchanged: rf.unchanged, message: rf.message };
     case 'NOT_RELEASED': return { kind: 'notReleased', message: rf.message };
     default:
       return { kind: 'noReviewedRecovery', ingredientId: t?.ingredientId ?? '', stillNeededInStepIds: t ? t.allRemainingUses.map((u) => u.stepId) : [], unchanged: rf.unchanged, message: rf.message };
@@ -219,6 +242,7 @@ function interpretationOf(res: EvaluationResult, r: Recipe, v: Vocabulary, ss: R
   const display = [
     { label: 'Missing', value: `${getIngredient(r, t.ingredientId)!.name} · step ${t.order}, ${amountDisplay(u.amount)}` },
     { label: 'Its role there', value: upperFirst(labelsOf(v, u).join(' · ')) },
+    ...(u.origin ? [{ label: 'Came in with', value: 'a change you accepted earlier in this session' }] : []),
     ...(res.proposal ? [{ label: 'You asked about', value: upperFirst(res.proposal.proposed.map((p) => p.label).join(' and ')) }] : []),
     { label: 'Your place', value: place },
   ];
@@ -230,10 +254,11 @@ export function rescueEvaluation(args: {
   evaluationId: Id; runId: Id; baseRevision: number; actionable: boolean; res: EvaluationResult; snapRecipe: Recipe; v: Vocabulary;
   stepStatus: Record<Id, StepStatus>; mode: 'COOK' | 'ENGINEERING'; interpretationSummary: string | null;
   explained?: { why: Why; answer: { text: string; source: 'model' | 'template' }; note: string };
+  basis?: RescueEvaluation['basis'];
 }): RescueEvaluation {
   const { res } = args;
   const base = {
-    id: args.evaluationId, runId: args.runId, evaluatedAtRunRevision: args.baseRevision, actionable: args.actionable,
+    id: args.evaluationId, runId: args.runId, evaluatedAtRunRevision: args.baseRevision, actionable: args.actionable, ...(args.basis ? { basis: args.basis } : {}),
     interpretation: interpretationOf(res, args.snapRecipe, args.v, args.stepStatus),
     speech: { text: res.speech, source: 'engineAuthored' as const, correspondsTo: args.evaluationId },
     trace: { interpretation: args.interpretationSummary, deterministic: deterministicSummary(res), explanation: args.explained?.note ?? null },

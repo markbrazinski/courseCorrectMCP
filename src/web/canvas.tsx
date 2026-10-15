@@ -1,6 +1,7 @@
 // Import canvas (HF Import Review v1): the reading's stages as the server returns them, then the review (matrix → step →
-// use) of every ingredient use's analysis, and Save. Nothing here asks the cook to confirm anything (owner decision
-// 2026-10-02); every status, plan and reason is the server's.
+// use) of every ingredient use's analysis, and Save. Every status, plan, reason and question is the server's. Since 2026-10-13 the
+// cook may answer the server's questions about this recipe (what an ingredient is, what a step does) when an answer would let a
+// reviewed change apply, and may re-run a check for alternatives that didn't finish (the same import; nothing read twice).
 import { useEffect, useState, type ReactNode } from 'react';
 import { newId, web, type ImportJob, type SourceLine, type WireDraft, type WireSourceDoc } from './api.ts';
 import { Review, statusCounts } from './review.tsx';
@@ -70,6 +71,25 @@ export function Canvas({ draftId, jobId, wide, onSaved, onPage, activity }: {
   const pendingN = counts.find((x) => x.s === 'pending')?.n ?? 0;
   const saved = !!draft!.savedAs && draft!.savedAs.draftRevision === draft!.revision;
   const stillOpen = draft!.blockers.map((b) => b.message);
+  const retryChecks = async (jobId: string) => {
+    setBusy(true); setErr(null);
+    const r = await web<{ job?: ImportJob; error?: { code: string } }>('POST', `/imports/${jobId}/retry`, {}, {}, 'Check the remaining uses again');
+    if (!r.data.job) setErr(r.data.error?.code === 'RETRY_LIMIT' ? 'These uses have been checked as many times as they can be.' : 'Checking didn’t start. Try again.');
+    else await follow(r.data.job.id);
+    await load(); setBusy(false);
+  };
+  const choose = async (ingredientId: string, option: number) => {
+    setBusy(true); setErr(null);
+    const r = await web<{ draft?: WireDraft; error?: { code: string } }>('POST', `/drafts/${draftId}/choices`, { expectedRevision: draft!.revision, ingredientId, option }, {}, 'Choose from the recipe');
+    if (r.data.draft) setD({ ...d!, draft: r.data.draft }); else { setErr('That choice wasn’t recorded. The recipe may have changed; it has been reloaded.'); await load(); }
+    setBusy(false);
+  };
+  const answer = async (questionId: string, value: 'yes' | 'no') => {
+    setBusy(true); setErr(null);
+    const r = await web<{ draft?: WireDraft; error?: { code: string } }>('POST', `/drafts/${draftId}/confirmations`, { expectedRevision: draft!.revision, answers: [{ questionId, answer: value }] }, {}, 'Confirm a recipe detail');
+    if (r.data.draft) setD({ ...d!, draft: r.data.draft }); else { setErr('That answer wasn’t recorded. The recipe may have changed; it has been reloaded.'); await load(); }
+    setBusy(false);
+  };
   const appendText = async () => {
     if (!paste?.text.trim()) return;
     setPaste({ ...paste, reading: true }); setErr(null);
@@ -87,8 +107,10 @@ export function Canvas({ draftId, jobId, wide, onSaved, onPage, activity }: {
   };
   const banner = <>
     {draft!.blockers.map((b) => <div key={b.id} className="attention" style={{ flex: '1 1 100%', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-      <div style={{ flex: 1, minWidth: 260, display: 'flex', flexDirection: 'column', gap: 4 }}><span className="eyebrow">Next · incomplete reading</span><span style={{ fontSize: 17 }}><strong>{b.message}</strong> Uses in those steps can’t be checked until the steps are added.</span></div>
-      {!paste && b.resolution && <button className="b primary" onClick={() => setPaste({ text: '', reading: false })}>{b.resolution.label}</button>}
+      <div style={{ flex: 1, minWidth: 260, display: 'flex', flexDirection: 'column', gap: 4 }}><span className="eyebrow">{b.kind === 'chooseOption' ? 'Next · your recipe gives a choice' : 'Next · incomplete reading'}</span><span style={{ fontSize: 17 }}><strong>{b.message}</strong> {b.kind === 'chooseOption' ? 'The recipe can be saved, and started once you choose.' : b.kind === 'unclearLine' ? 'It can’t be started until that line is clear.' : 'Uses in those steps can’t be checked until the steps are added.'}</span></div>
+      {b.resolution?.action === 'choose' && <div role="group" aria-label={b.message} data-testid="option-choice" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {b.resolution.options.map((o) => <button key={o.index} className="b" disabled={busy} onClick={() => void choose(b.resolution!.action === 'choose' ? (b.resolution as { ingredientId: string }).ingredientId : '', o.index)}>{o.text}</button>)}</div>}
+      {!paste && b.resolution?.action === 'appendText' && <button className="b primary" onClick={() => setPaste({ text: '', reading: false })}>{b.resolution.label}</button>}
       {paste && <div style={{ flex: '1 1 100%', display: 'flex', flexDirection: 'column', gap: 8 }}>
         <textarea value={paste.text} readOnly={paste.reading} onChange={(e) => setPaste({ ...paste, text: e.target.value })} aria-label="Pasted steps" placeholder="Paste the missing steps exactly as they appear in your recipe." style={{ width: '100%', height: 110, fontSize: 15, border: '1.5px solid var(--cc-border-strong)', borderRadius: 8, padding: 8 }} />
         {paste.reading && <span role="status" style={{ fontWeight: 700 }}><span className="dots"><i /><i /><i /></span> Reading the pasted steps…</span>}
@@ -96,11 +118,28 @@ export function Canvas({ draftId, jobId, wide, onSaved, onPage, activity }: {
           <span className="muted" style={{ fontSize: 14 }}>Your original file is kept as it was. The pasted text is kept as a separate source.</span></div>
       </div>}
     </div>)}
+    {draft!.unchecked && <div role="status" data-testid="unchecked" className="attention" style={{ flex: '1 1 100%', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+      <div style={{ flex: 1, minWidth: 260, display: 'flex', flexDirection: 'column', gap: 4 }}><span className="eyebrow">Not checked yet</span>
+        <span style={{ fontSize: 17 }}><strong>{draft!.unchecked.reason}</strong> {draft!.unchecked.uses} {draft!.unchecked.uses === 1 ? 'use wasn’t' : 'uses weren’t'} checked for alternatives. The recipe as read is kept; nothing is guessed for them.</span></div>
+      {draft!.unchecked.canRetry && <button className="b primary" disabled={busy || live(job)} onClick={() => void retryChecks(draft!.unchecked!.jobId)}>Check them again</button>}
+    </div>}
+    {draft!.questions.length > 0 && !saved && <section aria-label="Confirm details from your recipe" data-testid="questions" style={{ flex: '1 1 100%', display: 'flex', flexDirection: 'column', gap: 10, border: '1.5px solid var(--cc-border-strong)', borderRadius: 12, padding: '12px 16px', background: 'var(--cc-surface)' }}>
+      <span className="eyebrow">Confirm from your recipe · {draft!.questions.length} {draft!.questions.length === 1 ? 'question' : 'questions'}</span>
+      <span className="muted" style={{ fontSize: 15 }}>A reviewed change can apply to this recipe once you confirm these. Only you can tell from your recipe; CourseCorrect doesn’t guess. Skip any you aren’t sure of.</span>
+      {draft!.questions.map((q) => <div key={q.id} data-testid="review-question" style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', borderTop: '1px solid var(--cc-border)', paddingTop: 8 }}>
+        <div style={{ flex: 1, minWidth: 260, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <strong style={{ fontSize: 17 }}>{q.prompt}</strong>
+          {q.quote && <span className="muted" style={{ fontSize: 14 }}>Your recipe: “{q.quote.length > 180 ? `${q.quote.slice(0, 180)}…` : q.quote}”</span>}
+          <span style={{ fontSize: 14 }}>Lets {q.unlocks.map((u) => `“${u.title}”`).join(' and ')} apply.</span>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}><button className="b sm primary" disabled={busy} onClick={() => void answer(q.id, 'yes')}>Yes</button><button className="b sm" disabled={busy} onClick={() => void answer(q.id, 'no')}>No</button></div>
+      </div>)}
+    </section>}
     {err && <div role="alert" className="attention" style={{ flex: '1 1 100%', fontWeight: 700 }}>{err}</div>}
   </>;
   const note = saved ? 'In your Recipe Book. Nothing in the recipe was changed.'
     : pendingN ? `${pendingN} ${pendingN === 1 ? 'use is' : 'uses are'} still being checked. You can save when checking finishes.`
-      : stillOpen.length ? `You can save now. It can’t be started until the missing steps are added.`
+      : stillOpen.length ? `You can save now. It can’t be started until ${draft!.blockers.some((b) => b.kind === 'chooseOption') ? 'you choose from your recipe’s options' : 'the missing steps are added'}.`
         : 'Saving keeps the recipe and every alternative found. Nothing in the recipe is changed.';
   return <Review content={c} sourceLines={d!.sourceLines} sourceName={src?.displayName ?? null} sourceRefs={draft!.sourceRefs} wide={wide} banner={banner}
     footer={<div style={{ flex: 'none', borderTop: '1px solid var(--cc-border-strong)', background: 'var(--cc-surface)' }}>

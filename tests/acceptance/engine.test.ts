@@ -15,6 +15,7 @@ import { MAX_CHANGES_PER_RUN } from '../../src/contract/types.ts';
 
 const risotto = () => pack(RECIPE['risotto.demo']);
 const atStep5 = () => snapshotAfter(risotto(), fixtureActions('risotto.step5'));
+const first = (x: ReturnType<typeof evaluate>) => x.candidates[0];
 
 describe('risotto split (B1, B2, B3)', () => {
   it('B1: liquid now, acidity at finish, flavor dropped with tradeoff; resume at step 5 not started; prefix byte-identical', () => {
@@ -169,18 +170,36 @@ describe('references, notices, modes (B9, B11, B16, B33)', () => {
     expect(evaluate(risotto(), vocab, { ...v2, appliedRescueCount: MAX_CHANGES_PER_RUN }, req(ING['butter'])).refusal?.code).toBe('SUCCESSIVE_RESCUE_UNSUPPORTED');
   });
 
-  it('several changes per run: a later change applies on the changed recipe, but never rewrites what an earlier change altered (SYNTHETIC)', () => {
-    const p = compile(expandRecipe(source(RECIPE['risotto.demo'])), vocab, withPatterns(synSwapCheese())).pack!;
+  it('several changes per run (ENGINE_SEMANTICS 4): a later change is re-bound on the changed recipe and keeps what the earlier one added; a whole-step rewrite of a changed step conflicts (SYNTHETIC)', () => {
+    const ps = withPatterns(synSwapCheese()), k = { releaseId: 'kr-synthetic', vocab, patterns: ps };
+    const p = compile(expandRecipe(source(RECIPE['risotto.demo'])), vocab, ps).pack!;
     const at7 = snapshotAfter(p, doneUpTo(p, 6));
     expect(evaluateWithEnough(p, at7, ING['parm']).second.status).toBe('CANDIDATES');   // on its own, the synthetic cheese rule applies at step 7
     const snap = atStep5();
-    const { second } = evaluateWithEnough(p, snap, ING['wine']);                       // change 1 (split) rewrites step 7: adds lemon juice
+    const { second } = evaluateWithEnough(p, snap, ING['wine']);                       // change 1 (split) rewrites step 7: adds 10 ML lemon juice
     const r2 = second.candidates[0].resultRecipe, ss = { ...snap.stepStatus }, us = { ...snap.useStatus };
     for (const st of r2.steps.slice(4, 6)) { ss[st.stepId] = 'COMPLETED'; for (const u of r2.uses.filter((x) => x.stepId === st.stepId)) us[u.useId] = 'ADDED'; }
-    const v2 = { ...snap, recipe: r2, version: 2, appliedRescueCount: 1, stepStatus: ss, useStatus: us };   // steps 5–6 then done
-    const later = evaluateWithEnough(p, v2, ING['parm']).second;                      // change 2 would rewrite step 7 again
-    expect(later.refusal?.code).toBe('CONFLICTS_WITH_EARLIER_CHANGE');
-    expect(later.trace.bindings[0].checks[0]).toMatchObject({ stage: 'HISTORY', result: 'FAIL', detail: STEP['r.finish'] });
+    const v2 = { ...snap, recipe: r2, version: 2, appliedRescueCount: 1, stepStatus: ss, useStatus: us, knowledgeReleaseId: k.releaseId };   // steps 5–6 then done
+    // the frozen cheese plan read step 7 as saved; with no release to re-bind from, nothing is guessed
+    expect(evaluateWithEnough(p, v2, ING['parm']).second.refusal?.code).toBe('KNOWLEDGE_UNAVAILABLE');
+    const ask = (rk: typeof k) => { const a1 = evaluate(p, vocab, v2, req(ING['parm']), false, rk); return evaluate(p, vocab, v2, req(ING['parm'], [], a1.questions.map((q) => ({ questionId: q.questionId, choiceId: 'ENOUGH' as const }))), false, rk); };
+    const later = ask(k);
+    expect(later.status).toBe('CANDIDATES');
+    expect(later.rebound?.coverage.find((c) => c.patternId === 'syn_swap_cheese')?.status).toBe('BOUND');
+    const finish = renderStep(later.candidates[0].resultRecipe, getStep(later.candidates[0].resultRecipe, STEP['r.finish'])!);
+    expect(finish).toContain('10 ML lemon juice');            // change 1's addition is kept …
+    expect(finish).toContain('5 ML lemon juice');             // … beside change 2's replacement
+    expect(finish).not.toMatch(/Parmesan/i);
+    // combined demand: the same ingredient, still to be added for change 1, is reserved, never double-counted
+    const lemon = first(later).requirements.find((x) => /lemon/i.test(x.name))!;
+    expect(lemon).toMatchObject({ qty: { n: 5, d: 1 }, alreadyReserved: { qty: { n: 10, d: 1 } } });
+    // a rule that rewrites the whole finishing step would erase change 1: refused, nothing changed
+    const rewrite = synSwapCheese();
+    rewrite.patternId = 'syn_rewrite_cheese';
+    rewrite.ops.splice(1, 0, { op: 'SET_STEP_TEXT', step: '$target.step', text: 'Off the heat, stir in {use:sub_use}.' });
+    const clash = ask({ ...k, patterns: withPatterns(rewrite) });
+    expect(clash.refusal?.code).toBe('CONFLICTS_WITH_EARLIER_CHANGE');
+    expect(clash.rebound?.coverage.find((c) => c.patternId === 'syn_rewrite_cheese')?.failedCheck).toEqual({ code: 'REWRITES_EARLIER_CHANGE', detail: STEP['r.finish'] });
   });
 });
 
@@ -298,6 +317,22 @@ describe('authority and integrity (B26, B28, B29, determinism)', () => {
     expect(parseAmount('½ cup', 'US')).toMatchObject({ kind: 'EXACT', unit: 'ML', value: { n: 473176473, d: 4000000 }, asWritten: '½ cup' });
     expect(parseAmount('1 ½ cups', 'US')).toMatchObject({ kind: 'EXACT', unit: 'ML', value: { n: 1419529419, d: 4000000 } });   // M2: mixed numbers
     expect(parseAmount('8 oz', 'US')).toMatchObject({ kind: 'EXACT', unit: 'G' });
+  });
+  // corpus 2026-10-13: Sloppy Joseph, Butter Chicken and Fannie Farmer's amounts
+  it('compound amounts: an equivalent is one amount (never summed), an addition is summed, a range is never exact, an unsure unit is never guessed', () => {
+    const v = (s: string) => { const a = parseAmount(s, 'US'); return a.kind === 'EXACT' ? [a.unit, Math.round((a.value.n / a.value.d) * 100) / 100, a.asWritten] : a.kind === 'RANGE' ? ['RANGE', a.unit, a.asWritten] : [a.kind]; };
+    expect(v('1 lb / 0.5 kg')).toEqual(['G', 453.59, '1 lb / 0.5 kg']);             // the first measure; the wording (both) kept
+    expect(v('1lb/.5kg')).toEqual(['G', 453.59, '1lb/.5kg']);
+    expect(v('1/2 cup (120 ml)')).toEqual(['ML', 118.29, '1/2 cup (120 ml)']);
+    expect(v('1 1/2 cups / 350 ml')).toEqual(['ML', 354.88, '1 1/2 cups / 350 ml']);
+    expect(v('150g or 1 large')).toEqual(['G', 150, '150g or 1 large']);
+    expect(v('1 cup (500 ml)')).toEqual(['AS_WRITTEN']);                           // two measures that disagree are not one amount
+    expect(v('1 tablespoon plus 2 teaspoons')).toEqual(['ML', 24.64, '1 tablespoon plus 2 teaspoons']);
+    expect(v('1 cup plus 1 egg')).toEqual(['AS_WRITTEN']);                         // no sum across dimensions
+    expect(v('2 1/2-3tsp')).toEqual(['RANGE', 'ML', '2 1/2-3tsp']);
+    expect(v('2-1/2 cups')).toEqual(['ML', 591.47, '2-1/2 cups']);                 // a hyphenated mixed number
+    expect(v('1 Cupful')).toEqual(['ML', 236.59, '1 Cupful']);
+    for (const s of ['1 quart', '1-1/2 pint', '1 c.', '1 T', '1 Heaping Teaspoonful', '6 large tablespoonfuls']) expect(v(s)).toEqual(['AS_WRITTEN']);
   });
 });
 

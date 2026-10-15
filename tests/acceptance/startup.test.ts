@@ -7,7 +7,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { demoPdf } from '../fixtures/demo-cards.ts';
 import { SCONE_LINES } from '../fixtures/demo-sources.ts';
-import { ROOT } from '../helpers.ts';
+import { content, ROOT } from '../helpers.ts';
 
 const MAIN = join(ROOT, 'src/service/main.ts');
 
@@ -44,6 +44,19 @@ const mcp = async (base: string, name: string, args: Record<string, unknown> = {
 };
 
 describe('product startup', () => {
+  it('start over (owner key) moves the kitchen to a new, empty workspace; the examples stay', async () => {
+    const s = start({ CC_OWNER_TOKEN: 'k' });
+    try {
+      await s.ready;
+      const book = (await mcp(s.base, 'list_recipes')).recipes as { recipeId: string }[];
+      expect((await mcp(s.base, 'start_recipe', { commandId: 'c1', recipeId: book[0].recipeId })).outcome).toBe('started');
+      expect((await mcp(s.base, 'get_active_recipe')).run).not.toBeNull();
+      expect((await fetch(`${s.base}/admin/start-over`, { method: 'POST', headers: { authorization: 'Bearer k' } })).status).toBe(200);
+      expect((await mcp(s.base, 'get_active_recipe')).run).toBeNull();
+      expect(((await mcp(s.base, 'list_recipes')).recipes as unknown[])).toHaveLength(2);
+    } finally { s.stop(); }
+  }, 30_000);
+
   it('loads no test or probe code, and reads no replay data', () => {
     const files = [...closure(MAIN)].map((f) => relative(ROOT, f));
     expect(files.filter((f) => /^(tests|src\/probes)\//.test(f))).toEqual([]);
@@ -58,9 +71,9 @@ describe('product startup', () => {
     const s = start({});
     try {
       await s.ready;
-      expect(await (await fetch(`${s.base}/health`)).json()).toEqual({ ok: true, interpreter: 'NONE', speech: 'off' });
+      expect(await (await fetch(`${s.base}/health`)).json()).toEqual({ ok: true, interpreter: 'NONE', speech: 'off', knowledge: content.releaseId });   // the bundled content, published locally as a release
       const book = (await mcp(s.base, 'list_recipes')).recipes as { title: string }[];
-      expect(book.map((r) => r.title).sort()).toEqual(['Cream Scones', 'Risotto with Parmesan', 'Strawberry Shortcake']);
+      expect(book.map((r) => r.title).sort()).toEqual(['Risotto with Parmesan', 'Strawberry Shortcake']);   // the scones are Add recipe's sample import
       // the M2 probe's retained reading covers exactly these bytes; the product must still say live reading is required
       const up = await fetch(`${s.base}/imports`, { method: 'POST', headers: { 'content-type': 'application/pdf', 'x-filename': 'scones.pdf' }, body: Buffer.from(demoPdf(SCONE_LINES)) });
       const { job } = (await up.json()) as { job: { id: string } };
@@ -70,6 +83,7 @@ describe('product startup', () => {
       // no fixture-scene route (test server only); owner routes need the owner key
       expect((await fetch(`${s.base}/admin/reset`, { method: 'POST', body: '{}' })).status).toBe(404);
       expect((await fetch(`${s.base}/admin/start-over`, { method: 'POST' })).status).toBe(401);
+      expect((await fetch(`${s.base}/admin/start-over`, { method: 'POST', headers: { authorization: 'Bearer wrong' } })).status).toBe(401);
       expect((await fetch(`${s.base}/authoring/vocabulary`)).status).toBe(401);
     } finally { s.stop(); }
   }, 30_000);

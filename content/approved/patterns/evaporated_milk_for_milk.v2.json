@@ -1,0 +1,203 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "RECOVERY",
+  "patternId": "evaporated_milk_for_milk",
+  "version": 2,
+  "title": "Evaporated milk and water for milk in a dough",
+  "target": {
+    "ingredientClass": "milk",
+    "performsAll": [
+      "LIQUID"
+    ],
+    "stepTechnique": "MIX_DOUGH"
+  },
+  "slots": [],
+  "applicability": [],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "SOURCED",
+    "basis": "OD-8 (commission 2026-10-11, successive substitutions; ENGINEERING only, not culinary validation, not released guidance; owner confirmation requested). Supersedes v1 (OD-7 B7) in releases published from 2026-10-11; v1 stays in the releases that contain it, and every recipe and cooking session pinned to one keeps it. Ratio, base and sources are v1's, unchanged: 1/2 evaporated + 1/2 water by volume, scaled from the milk's listed total: ATK SRC-CM-38#a-c (tested 75/25, 67/33, 50/50 in pudding, sponge cake, bechamel; only 50/50 close to milk); NDSU SRC-CM-29#e, Mississippi State SRC-CM-30#b, Oregon State SRC-CM-31#d, Illinois SRC-CM-32#a. Disagreements kept: Nestle US 1:1 undiluted (SRC-CM-37, refuted by ATK's test); Nestle NZ 1:1.25 water (SRC-CM-39#a, product-specific). Doughs were not among the tested foods. Engineering bounds 60-480 ML, unchanged. One change from v1: if the milk being replaced carries an earlier accepted change's 'only if needed' extra (cream_to_butter_milk adds up to 30 ML more milk), that extra is carried as the same half-and-half mix, half evaporated milk and half water. That carry is an ENGINEERING INFERENCE from the sourced ratio: no source discusses a hydration allowance. Without it v1 cannot replace that milk at all (it would drop the earlier change's extra), and the engine refuses it.",
+    "approval": "COMMISSIONED_PENDING_OWNER_CONFIRMATION"
+  },
+  "introduces": [
+    {
+      "local": "evap",
+      "kindId": "evaporated-milk",
+      "name": "Evaporated milk"
+    },
+    {
+      "local": "water",
+      "kindId": "water",
+      "name": "Water"
+    }
+  ],
+  "quantities": {
+    "evap": {
+      "kind": "SCALE",
+      "from": {
+        "listedTotalOf": "$target"
+      },
+      "sourceUnit": "ML",
+      "factor": {
+        "n": 1,
+        "d": 2
+      },
+      "resultUnit": "ML",
+      "inputDomain": [
+        {
+          "n": 60,
+          "d": 1
+        },
+        {
+          "n": 480,
+          "d": 1
+        }
+      ],
+      "increment": {
+        "n": 1,
+        "d": 1
+      },
+      "maxAbsError": {
+        "n": 1,
+        "d": 2
+      },
+      "outputDomain": [
+        {
+          "n": 30,
+          "d": 1
+        },
+        {
+          "n": 240,
+          "d": 1
+        }
+      ]
+    },
+    "water": {
+      "kind": "SCALE",
+      "from": {
+        "listedTotalOf": "$target"
+      },
+      "sourceUnit": "ML",
+      "factor": {
+        "n": 1,
+        "d": 2
+      },
+      "resultUnit": "ML",
+      "inputDomain": [
+        {
+          "n": 60,
+          "d": 1
+        },
+        {
+          "n": 480,
+          "d": 1
+        }
+      ],
+      "increment": {
+        "n": 1,
+        "d": 1
+      },
+      "maxAbsError": {
+        "n": 1,
+        "d": 2
+      },
+      "outputDomain": [
+        {
+          "n": 30,
+          "d": 1
+        },
+        {
+          "n": 240,
+          "d": 1
+        }
+      ]
+    }
+  },
+  "ops": [
+    {
+      "op": "REPLACE_USE",
+      "use": "$target",
+      "with": {
+        "local": "evap_use",
+        "ingredient": {
+          "introduce": "evap"
+        },
+        "at": "$target.step",
+        "qty": "evap",
+        "prepNote": null,
+        "functions": [
+          "LIQUID"
+        ],
+        "allowance": {
+          "carryFrom": "$target",
+          "factor": {
+            "n": 1,
+            "d": 2
+          },
+          "stopCondition": "Mix it with the same amount of water and add the mix 1 tablespoon at a time; stop as soon as no dry flour remains.",
+          "ifExhausted": "If the dough is still crumbly after that, press it together with your hands; don't add more liquid."
+        }
+      }
+    },
+    {
+      "op": "ADD_USE",
+      "use": {
+        "local": "water_use",
+        "ingredient": {
+          "introduce": "water"
+        },
+        "at": "$target.step",
+        "qty": "water",
+        "prepNote": null,
+        "functions": [],
+        "allowance": {
+          "carryFrom": "$target",
+          "factor": {
+            "n": 1,
+            "d": 2
+          },
+          "stopCondition": "Only mixed into the extra evaporated milk.",
+          "ifExhausted": ""
+        }
+      },
+      "placement": {
+        "beside": "evap_use",
+        "joiner": "mixed with"
+      }
+    },
+    {
+      "op": "SET_RESUME",
+      "step": "$target.step"
+    }
+  ],
+  "siblingHandlers": [],
+  "functionAccounting": [
+    {
+      "from": "$target",
+      "functionId": "LIQUID",
+      "disposition": "RETAINED",
+      "to": "evap_use"
+    }
+  ],
+  "introducedFunctions": [],
+  "consequence": {
+    "outcomeClass": "SUBSTITUTED",
+    "equivalence": "NOT_EQUIVALENT",
+    "headline": "Mix evaporated milk with the same amount of water and use it instead of the milk.",
+    "reason": "Evaporated milk is milk with much of its water removed; an equal amount of water brings it back close to milk.",
+    "tradeoff": "In America's Test Kitchen's tests a half-and-half mix came close to milk; doughs weren't tested. Use unsweetened evaporated milk, not sweetened condensed milk; the ratio is for US-style evaporated milk, and some countries' products are more concentrated."
+  },
+  "proposal": {
+    "classes": [
+      "evaporated-milk"
+    ],
+    "relation": "REALIZED_AS_PROPOSED",
+    "text": "Yes, mixed with the same amount of water."
+  },
+  "guards": [
+    {
+      "kind": "CURRENT_STEP_IS",
+      "step": "$target.step"
+    }
+  ]
+}

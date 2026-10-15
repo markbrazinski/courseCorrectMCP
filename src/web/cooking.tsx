@@ -220,7 +220,7 @@ export function Cooking({ active, setActive, refresh, speak, handleRef, wide, on
         {!rx && <nav aria-label="Recipe steps and ingredients" style={{ flex: '0 0 250px', borderRight: '1px solid var(--cc-border)', background: 'var(--cc-surface-2)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div style={{ padding: '14px 14px 8px', display: 'flex', flexDirection: 'column', gap: 8 }}>
             <span style={{ fontFamily: 'var(--cc-font-head)', fontSize: 19, fontWeight: 700 }}>{recipe.title}</span>
-            <span className="muted" style={{ fontSize: 12 }}>{run.contentLabel}</span>
+            <span className="muted" style={{ fontSize: 12 }} title={run.knowledge?.releaseId ? `Knowledge release ${run.knowledge.releaseId}${run.knowledge.basis === 'HASH_MATCH' ? ' (matched by content: saved before releases were recorded)' : ''}` : 'Knowledge release unknown: saved before releases were recorded'}>{run.contentLabel}</span>
             <div role="tablist" style={{ display: 'flex', gap: 4 }}>
               {(['steps', 'ings'] as const).map((t) => <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)} style={{ flex: 1, border: tab === t ? '2px solid var(--cc-text)' : '1.5px solid var(--cc-border-strong)', borderRadius: 8, padding: '8px 6px', fontSize: 15, fontWeight: tab === t ? 700 : 400, background: tab === t ? 'var(--cc-surface)' : 'transparent' }}>{t === 'steps' ? 'Steps' : 'Ingredients'}</button>)}
             </div>
@@ -242,9 +242,10 @@ export function Cooking({ active, setActive, refresh, speak, handleRef, wide, on
               {recipe.ingredients.map((g) => {
                 const open = openIngs.includes(g);
                 return <div key={g.id} style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '9px 10px', borderRadius: 8, background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, fontSize: 15 }}><strong>{g.name}</strong><span style={{ textAlign: 'right' }}>{g.totalAmount.display}</span></div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, fontSize: 15 }}><strong>{g.name}{g.group && <span style={{ fontWeight: 400 }}> · {g.group.replace(/:\s*$/, '')}</span>}</strong><span style={{ textAlign: 'right' }}>{g.totalAmount.display}</span></div>
                   {g.uses.map((u) => { const d = st(u.stepId).progress === 'done' || st(u.stepId).partialUseIds.includes(u.id);
-                    return <span key={u.id} style={{ fontSize: 13 }} className={d ? 'muted' : undefined}>{d ? '✓ ' : ''}Step {steps.find((s) => s.id === u.stepId)?.ordinal} · {u.amount.display ?? 'not stated'}{d ? ' · used' : (u.reviewedFunction ?? u.proposedFunction) ? ` · ${(u.reviewedFunction ?? u.proposedFunction)!.labels.join(' · ')}` : ''}</span>; })}
+                    return <span key={u.id} style={{ fontSize: 13 }} className={d ? 'muted' : undefined}>{d ? '✓ ' : ''}Step {steps.find((s) => s.id === u.stepId)?.ordinal} · {u.amount.display ?? 'not stated'}{d ? ' · used' : (u.reviewedFunction ?? u.proposedFunction) ? ` · ${(u.reviewedFunction ?? u.proposedFunction)!.labels.join(' · ')}` : ''}
+                      {u.introducedBy && <em data-testid="introduced" title={u.introducedBy.title ?? undefined}> · from your change{u.introducedBy.replaces ? ` (instead of the ${u.introducedBy.replaces.toLowerCase()})` : ''}</em>}</span>; })}
                   {g.removedByAmendment && <span style={{ fontSize: 13, fontWeight: 700 }}>Not needed after your change</span>}
                   {open && !g.removedByAmendment && !pend && <button className="b sm" style={{ alignSelf: 'flex-start', fontSize: 14 }} onClick={() => void tapMissing(g.id, g.name)}>I don’t have this</button>}
                 </div>;
@@ -300,7 +301,7 @@ export function Cooking({ active, setActive, refresh, speak, handleRef, wide, on
           </div>
         </div>}
 
-        {rx && <Rescue rx={rx} setRx={setRx} run={run} active={active} steps={steps} st={st} openIngs={openIngs.map((g) => ({ id: g.id, name: g.name }))} wide={wide} pend={pend}
+        {rx && <Rescue rx={rx} setRx={setRx} run={run} active={active} steps={steps} st={st} openIngs={openIngs.map((g) => ({ id: g.id, name: g.name, group: g.group ?? null }))} wide={wide} pend={pend}
           close={close} notNow={() => { setWaiting(rx); setRx(null); }} accept={accept} sendApply={() => { const p = pending.get(); if (p) { setRx({ phase: 'unknown', checking: true, checkedAgain: false }); void sendApply(p); } }}
           checkStatus={checkStatus} tapMissing={tapMissing} recheck={recheck} answer={(res, q, v) => void answerOne(res, q, v)} holdView={() => setRx(null)} />}
       </div>
@@ -312,7 +313,7 @@ export function Cooking({ active, setActive, refresh, speak, handleRef, wide, on
 // ---------- Changing course ----------
 function Rescue({ rx, setRx, run, active, steps, st, openIngs, wide, pend, close, notNow, accept, sendApply, checkStatus, tapMissing, recheck, answer, holdView }: {
   rx: Rx; setRx: (r: Rx) => void; run: WireRun; active: Active; steps: NonNullable<Active['recipe']>['steps']; st: (id: string) => WireRun['steps'][number];
-  openIngs: { id: string; name: string }[]; wide: boolean; pend: PendingCommand | null; close: (unchanged?: boolean) => void; notNow: () => void;
+  openIngs: { id: string; name: string; group?: string | null }[]; wide: boolean; pend: PendingCommand | null; close: (unchanged?: boolean) => void; notNow: () => void;
   accept: (ev: RescueEvaluation, c: WireCandidate, heard: Heard) => Promise<void>; sendApply: () => void; checkStatus: () => Promise<void>;
   tapMissing: (id: string, name: string, prev?: string) => Promise<void>; recheck: (evaluationId: string, answers: Answers, heard: Heard) => Promise<void>;
   answer: (res: Extract<Rx, { phase: 'result' }>, questionId: string, v: 'yes' | 'no') => void; holdView: () => void;
@@ -328,8 +329,8 @@ function Rescue({ rx, setRx, run, active, steps, st, openIngs, wide, pend, close
   const picker = (prev?: string) => <div role="group" aria-label="Which ingredient is missing" className="in" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
     <span style={{ fontFamily: 'var(--cc-font-head)', fontSize: 30, fontWeight: 700 }}>Which ingredient are you missing?</span>
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(220px,1fr))', gap: 8 }}>
-      {(ev?.outcome === 'needsInterpretation' && ev.options.length ? ev.options.map((o) => ({ id: o.ingredientId, name: o.label })) : openIngs).map((g) =>
-        <button key={g.id} className="b" style={{ textAlign: 'left', whiteSpace: 'normal', fontSize: 18 }} onClick={() => void tapMissing(g.id, g.name, prev)}>{g.name}</button>)}</div>
+      {(ev?.outcome === 'needsInterpretation' && ev.options.length ? ev.options.map((o) => ({ id: o.ingredientId, name: o.label, group: active.recipe!.ingredients.find((i) => i.id === o.ingredientId)?.group ?? null })) : openIngs).map((g) =>
+        <button key={g.id} className="b" style={{ textAlign: 'left', whiteSpace: 'normal', fontSize: 18 }} onClick={() => void tapMissing(g.id, g.name, prev)}>{g.name}{g.group ? ` · ${g.group.replace(/:\s*$/, '')}` : ''}</button>)}</div>
     {res?.pick && <button className="link" style={{ alignSelf: 'flex-start', fontSize: 16 }} onClick={() => setRx({ ...res, pick: false })}>Cancel · keep {missingName.toLowerCase()}</button>}
   </div>;
   const backBtns = <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}><button className="b primary" onClick={() => close(false)}>Ask about something else</button><button className="b" onClick={() => close()}>Back to step {cur?.ordinal} as written</button></div>;
@@ -375,6 +376,7 @@ function Rescue({ rx, setRx, run, active, steps, st, openIngs, wide, pend, close
                 <span className="eyebrow" style={{ color: 'var(--cc-proposed)', fontSize: 15 }}>Step {s.ordinal} · {z.stateLabel} · {z.titleAfter ?? s.title}</span>
                 <p data-testid={`change-${s.ordinal}`} style={{ margin: 0, fontSize: wide ? 29 : 25, lineHeight: 1.32 }}>{(z.segments ?? []).map((g, i) => (g.kind === 'inserted' ? <mark key={i} className="ins">{g.text}</mark> : <span key={i}>{g.text}</span>))}</p>
                 <span className="muted" style={{ fontSize: 16 }}><strong>As written:</strong> {st(s.id).effectiveText}</span>
+                {run.appliedAmendments.filter((a) => a.changedStepIds.includes(s.id)).map((a) => <span key={a.id} style={{ fontSize: 15 }}>Keeps your earlier change{a.title ? `: ${a.title.toLowerCase()}` : ''}.</span>)}
               </article>;
             })}
           </div>
@@ -389,7 +391,7 @@ function Rescue({ rx, setRx, run, active, steps, st, openIngs, wide, pend, close
                   <span className="eyebrow" style={{ fontSize: 14 }}>{o.role}</span><span style={{ fontSize: o.kind === 'alreadyDone' ? 16 : 18, fontWeight: o.kind === 'alreadyDone' ? 400 : 700 }}>{o.kind === 'replaced' ? '→ ' : o.kind === 'lost' ? '✕ ' : ''}{o.replacement}</span></div>)}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span className="eyebrow">Ingredients with this change</span>
                 {shown.ledger.map((l, i) => <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '5px 0', fontSize: 15, borderBottom: '1px solid var(--cc-border)' }}><span>{l.ingredient} · {l.step}</span><strong style={{ textAlign: 'right' }}>{l.after}</strong></div>)}</div>
-              <span className="muted" style={{ fontSize: 14 }}>Checked against your recipe · {interp?.display.find((x) => x.label === 'Your place')?.value}</span>
+              <span className="muted" style={{ fontSize: 14 }}>Checked against your recipe · {interp?.display.find((x) => x.label === 'Your place')?.value}{ev?.basis ? ` · version ${ev.basis.version}${run.appliedAmendments.length ? `, with your ${run.appliedAmendments.length} earlier change${run.appliedAmendments.length > 1 ? 's' : ''}` : ''}` : ''}</span>
             </div>
             <div style={{ flex: 'none', borderTop: '2px solid var(--cc-proposed)', padding: '14px 20px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
               <span className="eyebrow" style={{ color: 'var(--cc-text)', fontSize: 14 }}>What to expect</span>
@@ -491,6 +493,7 @@ function RefusalCard({ r, name, ordOf, answer, noRule }: { r: WireRefusal; name:
       <span style={{ fontSize: 21 }}>{r.reason === 'replacedByAmendment' ? 'The change you accepted replaced it.' : r.message}</span></>;
     case 'rescueLimitReached': return <><span className="eyebrow" style={{ fontSize: 14 }}>Change limit reached</span>{head}<span style={{ fontSize: 21 }}>{r.unchanged}</span></>;
     case 'earlierChangeConflict': return <><span className="eyebrow" style={{ fontSize: 14 }}>No change can be offered here</span><span style={{ fontFamily: 'var(--cc-font-head)', fontSize: 34, fontWeight: 700 }}>This would undo part of an earlier change</span>{head}<span style={{ fontSize: 19 }}>{r.unchanged}</span></>;
+    case 'knowledgeUnavailable': return <><span className="eyebrow" style={{ fontSize: 14 }}>Can’t check changes right now</span>{head}<span style={{ fontSize: 19 }}>{r.unchanged}</span></>;
     case 'notReleased': return head;
     default: return <>{head}<span style={{ fontSize: 21 }}>{r.unchanged}</span></>;
   }

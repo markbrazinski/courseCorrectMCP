@@ -18,7 +18,7 @@ import { recordedInterpreter } from '../../src/service/interpret.ts';
 import { LEMON_PAGE1, LEMON_PASTED, LEMON_READING_PAGE1, LEMON_READING_WITH_PASTE, SCONE_LINES, SCONE_PDF_READING, SCONE_READING, SHORTCAKE_LINES, SHORTCAKE_READING } from '../fixtures/demo-sources.ts';
 import { makePdf, scanImage } from '../fixtures/pdf.ts';
 import { RECORDED_INTENTS } from '../fixtures/recorded-intents.ts';
-import { cmd, content, doneUpTo, pack, req, snapshotAfter, vocab } from '../helpers.ts';
+import { cmd, content, doneUpTo, pack, req, snapshotAfter, vocab, newKv, newWs } from '../helpers.ts';
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const textPages = async (bytes: Uint8Array, pdf: boolean): Promise<SourcePage[]> => {
@@ -59,9 +59,9 @@ async function setup(c: typeof content = content, sconeText: unknown = SCONE_REA
   const dbPath = join(mkdtempSync(join(tmpdir(), 'ccmcp-imp-')), 'db');
   let n = 0;
   const ids = (p: string) => `${p}_${++n}`;
-  const svc = new Service({ dbPath, content: c, interpreter: recordedInterpreter(RECORDED_INTENTS), newId: ids });
-  const auth = new Authoring({ store: svc.store, content: c, extractor: recordedExtractor(rec), analyzer: recordedAnalyzer(demo.cards), newId: ids });
-  svc.catalog = () => auth.catalog();
+  const svc = new Service({ kv: newKv(dbPath), ws: newWs(), content: c, interpreter: recordedInterpreter(RECORDED_INTENTS), newId: ids });
+  const auth = new Authoring({ kv: svc.kv, ws: svc.ws, content: c, extractor: recordedExtractor(rec), analyzer: recordedAnalyzer(demo.cards), newId: ids });
+  svc.catalog = (t) => auth.catalogIn(t);
   return { svc, auth };
 }
 async function importText(auth: Authoring, text: string) {
@@ -74,8 +74,8 @@ async function importPdf(auth: Authoring, bytes: Uint8Array, filename: string) {
   if (r.status !== 202) throw new Error(JSON.stringify(r));
   return { job: await auth.waitForJob(r.job.id), draftId: r.draftId };
 }
-const usesOf = (auth: Authoring, draftId: string, name: string) => {
-  const c = auth.getDraft(draftId).draft.content!;
+const usesOf = async (auth: Authoring, draftId: string, name: string) => {
+  const c = (await auth.getDraft(draftId)).draft.content!;
   return c.ingredients.find((i) => i.name.toLowerCase() === name)!.uses.map((u) => ({ ...u, step: c.steps.find((s) => s.id === u.stepId)!.ordinal }));
 };
 
@@ -84,13 +84,13 @@ describe('A-1 scone PDF → swap plan computed at reading → save → cook, wit
     const { auth } = await setup();
     const { job, draftId } = await importPdf(auth, sconePdf, 'scones.pdf');
     expect(job).toMatchObject({ state: 'succeeded', stagesCompleted: ['reading', 'recipeFound', 'ingredientsAndSteps', 'uses', 'proposedFunctions', 'coverage'], failure: null });
-    const cream = usesOf(auth, draftId, 'heavy cream');
+    const cream = (await usesOf(auth, draftId, 'heavy cream'));
     expect(cream.map((u) => u.step)).toEqual([3, 6]);
     expect(cream.map((u) => u.proposedFunction?.labels)).toEqual([['liquid', 'aeration'], ['fat']]);    // what the model guessed
     expect(cream.map((u) => u.reviewedFunction?.labels)).toEqual([['liquid', 'fat'], ['browning']]);   // the approved table's rows
     expect(cream.map((u) => u.reviewedFunction?.reviewId)).toEqual(['roles.json#heavy-cream×MIX_DOUGH (content-decisions.md#OD-4; R-1)', 'roles.json#heavy-cream×BRUSH (content-decisions.md#OD-4; R-1)']);
     expect(cream.map((u) => u.reviewedFunction?.authority)).toEqual(['MACHINE_CHECKED', 'MACHINE_CHECKED']);
-    const fx = auth.effective(draftId)!;
+    const fx = (await auth.effective(draftId))!;
     expect(fx.uses.filter((u) => u.functions.some((f) => f.prov.status === 'REVIEWED')).every((u) => u.functions.every((f) => f.prov.by === 'CONTENT'))).toBe(true);
     expect(fx.ingredients.find((i) => i.name === 'heavy cream')!.listedProv.status).toBe('SOURCE_VERIFIED');
   });
@@ -98,7 +98,7 @@ describe('A-1 scone PDF → swap plan computed at reading → save → cook, wit
   it('the swap plan: dough cream → 85 g butter + 180 ML milk (+30 ML) (reviewed); brushing cream → a little milk; other uses from their cards', async () => {
     const { auth } = await setup();
     const { draftId } = await importPdf(auth, sconePdf, 'scones.pdf');
-    const [dough, brush] = usesOf(auth, draftId, 'heavy cream');
+    const [dough, brush] = (await usesOf(auth, draftId, 'heavy cream'));
     expect(dough.swap).toMatchObject({ kind: 'recovery', text: 'If you run out: Butter and milk for cream in a dough' });
     expect(dough.swap.details).toEqual([
       'Rub in cold butter and use milk in the dough, and brush with milk instead of cream.',
@@ -107,25 +107,25 @@ describe('A-1 scone PDF → swap plan computed at reading → save → cook, wit
     ]);
     expect(dough.swap).toMatchObject({ origin: 'reviewed', label: 'Reviewed change' });
     expect(brush.swap).toMatchObject({ kind: 'covered', text: 'Covered by step 3’s swap: a little milk'.replace('’', "'"), origin: 'reviewed' });
-    expect(usesOf(auth, draftId, 'plain flour')[0].swap).toMatchObject({ kind: 'refusal', origin: 'importCard', label: 'Prepared at import (AI)', text: 'No, because the flour is the structure of the scones; without it there is no dough.' });
+    expect((await usesOf(auth, draftId, 'plain flour'))[0].swap).toMatchObject({ kind: 'refusal', origin: 'importCard', label: 'Prepared at import (AI)', text: 'No, because the flour is the structure of the scones; without it there is no dough.' });
     // batch 1 (OD-7): the caster sugar has a reviewed plan now; the salt's omission is still its card's plan
-    expect(usesOf(auth, draftId, 'caster sugar')[0].swap).toMatchObject({ kind: 'recovery', origin: 'reviewed', text: 'If you run out: Granulated sugar for caster sugar in a dry mix' });
-    expect(usesOf(auth, draftId, 'salt')[0].swap).toMatchObject({ kind: 'recovery', origin: 'importCard', text: 'If you run out: Leave out the salt' });
-    const b = auth.requirements(draftId).bindings.find((x) => x.patternId === 'cream_to_butter_milk')!;
+    expect((await usesOf(auth, draftId, 'caster sugar'))[0].swap).toMatchObject({ kind: 'recovery', origin: 'reviewed', text: 'If you run out: Granulated sugar for caster sugar in a dry mix' });
+    expect((await usesOf(auth, draftId, 'salt'))[0].swap).toMatchObject({ kind: 'recovery', origin: 'importCard', text: 'If you run out: Leave out the salt' });
+    const b = (await auth.requirements(draftId)).bindings.find((x) => x.patternId === 'cream_to_butter_milk')!;
     expect(b.quantities).toEqual(pack(RECIPE['scones.demo']).bindings.find((x) => x.patternId === 'cream_to_butter_milk')!.quantities);
   });
 
   it('save → eligible → the recipe page reads the same → start → the §9.4 rescue renders exactly as the approved scone', async () => {
     const { svc, auth } = await setup();
     const { draftId } = await importPdf(auth, sconePdf, 'scones.pdf');
-    const saved = auth.save(draftId, { expectedRevision: auth.revision(draftId), idempotencyKey: 'save-1' });
+    const saved = await auth.save(draftId, { expectedRevision: await auth.revision(draftId), idempotencyKey: 'save-1' });
     expect(saved.release).toEqual({ kind: 'eligible', coverageSummary: 'Reviewed change on file: caster sugar, step 2; heavy cream, step 3; baking powder, step 2 · Prepared at import (AI): a card for 6 of 6 uses' });   // batch 1 adds the sugar and baking powder plans
-    expect(auth.save(draftId, { expectedRevision: 999, idempotencyKey: 'save-1' })).toEqual(saved);   // idempotent
-    const page = auth.getRecipe(saved.recipeId).version.content!;
-    expect(page.ingredients.flatMap((i) => i.uses.map((u) => u.swap))).toEqual(auth.getDraft(draftId).draft.content!.ingredients.flatMap((i) => i.uses.map((u) => u.swap)));
-    expect(svc.listRecipes().recipes.find((r) => r.recipeId === saved.recipeId)?.release.kind).toBe('eligible');
-    expect(svc.startRecipe({ commandId: cmd(), recipeId: saved.recipeId, recipeVersionId: saved.recipeVersionId }).outcome).toBe('started');
-    const p = auth.catalog().find((c) => c.recipeId === saved.recipeId)!.pack!;
+    expect(await auth.save(draftId, { expectedRevision: 999, idempotencyKey: 'save-1' })).toEqual(saved);   // idempotent
+    const page = (await auth.getRecipe(saved.recipeId)).version.content!;
+    expect(page.ingredients.flatMap((i) => i.uses.map((u) => u.swap))).toEqual((await auth.getDraft(draftId)).draft.content!.ingredients.flatMap((i) => i.uses.map((u) => u.swap)));
+    expect((await svc.listRecipes()).recipes.find((r) => r.recipeId === saved.recipeId)?.release.kind).toBe('eligible');
+    expect((await svc.startRecipe({ commandId: cmd(), recipeId: saved.recipeId, recipeVersionId: saved.recipeVersionId })).outcome).toBe('started');
+    const p = (await auth.catalog()).find((c) => c.recipeId === saved.recipeId)!.pack!;
     const snap = snapshotAfter(p, [{ stepId: p.recipe.steps[0].stepId, progress: 'done' }, { stepId: p.recipe.steps[1].stepId, progress: 'done' }]);
     const cream = p.recipe.ingredients.find((i) => i.name === 'heavy cream')!.ingredientId;
     const first = evaluate(p, vocab, snap, req(cream, ['whole-milk', 'unsalted-butter']));
@@ -146,23 +146,24 @@ describe('A-1 scone PDF → swap plan computed at reading → save → cook, wit
     const noBrush = { ...content, roles: { ...content.roles, roles: content.roles.roles.filter((x) => x.techniqueId !== 'BRUSH') } };
     const { auth } = await setup(noBrush);
     const { draftId } = await importPdf(auth, sconePdf, 'scones.pdf');
-    const [dough, brush] = usesOf(auth, draftId, 'heavy cream');
+    const [dough, brush] = (await usesOf(auth, draftId, 'heavy cream'));
     expect(brush.reviewedFunction).toBeNull();
-    const reviewed = auth.requirements(draftId).coverage.find((c) => c.patternId === 'cream_to_butter_milk')!;
+    const reviewed = (await auth.requirements(draftId)).coverage.find((c) => c.patternId === 'cream_to_butter_milk')!;
     expect(reviewed.status).toBe('NEEDS_FACTS');
-    expect(reviewed.missing).toContainEqual(expect.objectContaining({ predicate: 'FUNCTION', expected: 'BROWNING', have: 'PROPOSED' }));
+    // the role is the reading's (FAT for the brushing), never the card's own claim (2026-10-13): BROWNING is missing outright
+    expect(reviewed.missing).toContainEqual(expect.objectContaining({ predicate: 'FUNCTION', expected: 'BROWNING', have: null }));
     expect(dough.swap).toMatchObject({ kind: 'recovery', origin: 'importCard', label: 'Prepared at import (AI)', text: 'If you run out: Milk and cold butter for the heavy cream' });
     expect(brush.swap).toMatchObject({ origin: 'importCard' });
     // the cream rule can't bind (the point of this test); batch 1's sugar and baking powder plans still do
-    expect(auth.save(draftId, { expectedRevision: auth.revision(draftId) }).release).toEqual({ kind: 'eligible', coverageSummary: 'Reviewed change on file: caster sugar, step 2; baking powder, step 2 · Prepared at import (AI): a card for 6 of 6 uses' });
+    expect((await auth.save(draftId, { expectedRevision: await auth.revision(draftId) })).release).toEqual({ kind: 'eligible', coverageSummary: 'Reviewed change on file: caster sugar, step 2; baking powder, step 2 · Prepared at import (AI): a card for 6 of 6 uses' });
   });
 
   it('an uncorroborated technique (none read for step 3): the reviewed rule names what is missing; the card plan is used, labelled AI', async () => {
     const { auth } = await setup(content, SCONE_TEXT_NO_TECHNIQUE);
     const { draftId } = await importText(auth, SCONE_LINES.join('\n'));
-    const [dough] = usesOf(auth, draftId, 'heavy cream');
+    const [dough] = (await usesOf(auth, draftId, 'heavy cream'));
     expect(dough.reviewedFunction).toBeNull();
-    expect(auth.requirements(draftId).coverage.find((c) => c.patternId === 'cream_to_butter_milk')!.missing).toContainEqual(expect.objectContaining({ predicate: 'TECHNIQUE', expected: 'MIX_DOUGH' }));
+    expect((await auth.requirements(draftId)).coverage.find((c) => c.patternId === 'cream_to_butter_milk')!.missing).toContainEqual(expect.objectContaining({ predicate: 'TECHNIQUE', expected: 'MIX_DOUGH' }));
     expect(dough.swap).toMatchObject({ kind: 'recovery', origin: 'importCard' });
   });
 
@@ -170,18 +171,18 @@ describe('A-1 scone PDF → swap plan computed at reading → save → cook, wit
     const wrong = { ...SCONE_READING, steps: SCONE_READING.steps.map((x) => (x.key === 's3' ? { ...x, technique: 'BRUSH' } : x)) };
     const { auth } = await setup(content, wrong);
     const { draftId } = await importText(auth, SCONE_LINES.join('\n'));
-    expect(getStep(auth.effective(draftId)!, auth.effective(draftId)!.steps[2].stepId)!.technique!.prov.status).toBe('PROPOSED');
-    expect(usesOf(auth, draftId, 'heavy cream')[0].swap.origin).not.toBe('reviewed');
+    expect(getStep((await auth.effective(draftId))!, (await auth.effective(draftId))!.steps[2].stepId)!.technique!.prov.status).toBe('PROPOSED');
+    expect((await usesOf(auth, draftId, 'heavy cream'))[0].swap.origin).not.toBe('reviewed');
   });
 
   it('stale revision and stale subject are refused (409); corroboration never records an owner review', async () => {
     const { auth } = await setup();
     const { draftId } = await importText(auth, SCONE_LINES.join('\n'));
-    const rev = auth.revision(draftId);
-    expect(() => auth.assert(draftId, { expectedRevision: rev + 1, reviewer: 'owner', assertions: [] })).toThrow('STALE_REVISION');
-    expect(() => auth.assert(draftId, { expectedRevision: rev, reviewer: 'owner', assertions: [{ subject: { kind: 'STEP', id: 's3' }, predicate: 'TECHNIQUE', value: 'MIX_DOUGH', coreHash: 'wrong' }] })).toThrow('STALE_SUBJECT');
-    expect(() => auth.assert(draftId, { expectedRevision: rev, reviewer: '', assertions: [] })).toThrow('REVIEWER_REQUIRED');
-    const fx = auth.effective(draftId)!;
+    const rev = await auth.revision(draftId);
+    await expect(auth.assert(draftId, { expectedRevision: rev + 1, reviewer: 'owner', assertions: [] })).rejects.toThrow('STALE_REVISION');
+    await expect(auth.assert(draftId, { expectedRevision: rev, reviewer: 'owner', assertions: [{ subject: { kind: 'STEP', id: 's3' }, predicate: 'TECHNIQUE', value: 'MIX_DOUGH', coreHash: 'wrong' }] })).rejects.toThrow('STALE_SUBJECT');
+    await expect(auth.assert(draftId, { expectedRevision: rev, reviewer: '', assertions: [] })).rejects.toThrow('REVIEWER_REQUIRED');
+    const fx = (await auth.effective(draftId))!;
     expect([...fx.ingredients.map((i) => i.kind?.prov.by), ...fx.steps.map((s) => s.technique?.prov.by), ...fx.uses.flatMap((u) => u.functions.map((f) => f.prov.by))]).not.toContain('OWNER');
   });
 });
@@ -190,7 +191,7 @@ describe('shortcake and household risotto imports: no swap, honestly explained',
   it('shortcake: the whipping cream shows the authored refusal; the dough cream is "no for now" with its card\'s step-6 reason', async () => {
     const { auth } = await setup();
     const { draftId } = await importText(auth, SHORTCAKE_LINES.join('\n'));
-    const [dough, whip] = usesOf(auth, draftId, 'heavy cream');
+    const [dough, whip] = (await usesOf(auth, draftId, 'heavy cream'));
     // G13 (batch 1): the import analysis's own "no" is the answer; each reviewed refusal answers one replacement, listed beside it
     expect(whip.swap).toMatchObject({ kind: 'refusal', origin: 'importCard', text: expect.stringMatching(/^No, because this cream has to whip/) });
     expect(whip.analysis!.status).toBe('evaluatedNoOption');
@@ -202,11 +203,11 @@ describe('shortcake and household risotto imports: no swap, honestly explained',
   it('B14 household risotto: no swap; it needs the rice weight in grams (never inferred)', async () => {
     const { auth } = await setup();
     const { draftId } = await importText(auth, B14_LINES.join('\n'));
-    const [wine] = usesOf(auth, draftId, 'dry white wine');
+    const [wine] = (await usesOf(auth, draftId, 'dry white wine'));
     expect(wine.swap.kind).toBe('needsFacts');
     expect(wine.swap.text).toMatch(/^We couldn't work out a swap for this one\. A reviewed swap needs .*the rice weight in grams/);   // no recorded analysis here
-    expect(auth.save(draftId, { expectedRevision: auth.revision(draftId) }).release).toEqual({ kind: 'eligible', coverageSummary: 'No reviewed changes on file · Prepared at import (AI): a card for 0 of 4 uses' });
-    expect(usesOf(auth, draftId, 'butter')[0].swap.text).toBe("We couldn't work out a swap for this one");   // no recorded analysis: fail closed
+    expect((await auth.save(draftId, { expectedRevision: await auth.revision(draftId) })).release).toEqual({ kind: 'eligible', coverageSummary: 'No reviewed changes on file · Prepared at import (AI): a card for 0 of 4 uses' });
+    expect((await usesOf(auth, draftId, 'butter'))[0].swap.text).toBe("We couldn't work out a swap for this one");   // no recorded analysis: fail closed
   });
 });
 
@@ -216,7 +217,7 @@ describe('PDF import', () => {
     const r = await auth.createImport({ kind: 'pdf', bytes: sconePdf, filename: 'scones.pdf' });
     if (r.status !== 202) throw new Error('import');
     expect((await auth.waitForJob(r.job.id)).state).toBe('succeeded');
-    const d = auth.getDraft(r.draftId);
+    const d = await auth.getDraft(r.draftId);
     expect(d.sources[0]).toMatchObject({ kind: 'pdf', origin: 'upload', displayName: 'scones.pdf', pageCount: 1, pages: [{ index: 1, readable: 'text' }] });
     expect(d.draft.content!.steps).toHaveLength(7);
     expect(d.draft.sourceRefs[d.draft.content!.steps[2].id]).toMatchObject({ page: 1, origin: 'UPLOAD' });
@@ -246,18 +247,18 @@ describe('A-2 partial PDF + pasted missing steps (C-4)', () => {
     if (r.status !== 202) throw new Error('import');
     const job = await auth.waitForJob(r.job.id);
     expect(job.state).toBe('partial');
-    let d = auth.getDraft(r.draftId);
+    let d = await auth.getDraft(r.draftId);
     expect(d.sources[0].pages).toEqual([{ index: 1, readable: 'text' }, { index: 2, readable: 'image' }]);
-    expect(d.draft.blockers).toEqual([{ id: expect.any(String), kind: 'missingSteps', message: "Steps after step 3 are on page 2, a scanned image that couldn't be read.", resolution: { action: 'appendText', label: 'Paste the missing steps' } }]);
+    expect(d.draft.blockers).toEqual([{ id: expect.any(String), kind: 'missingSteps', message: "Steps after step 3 may be on page 2, which isn't readable text (a scan or a picture) and couldn't be read.", resolution: { action: 'appendText', label: 'Paste the missing steps' } }]);
     expect(d.draft.content!.ingredients.find((i) => i.name === 'Self-raising flour')!.uses).toEqual([]);
-    const saved1 = auth.save(r.draftId, { expectedRevision: auth.revision(r.draftId) });
+    const saved1 = await auth.save(r.draftId, { expectedRevision: await auth.revision(r.draftId) });
     expect(saved1.release).toMatchObject({ kind: 'ineligible', reasons: [{ code: 'MISSING_STEPS', nextAction: 'Paste the missing steps' }] });
-    expect(svc.listRecipes().recipes.find((x) => x.recipeId === saved1.recipeId)?.release.kind).toBe('ineligible');
-    expect(svc.startRecipe({ commandId: cmd(), recipeId: saved1.recipeId })).toMatchObject({ outcome: 'rejected', code: 'NOT_ELIGIBLE' });
+    expect((await svc.listRecipes()).recipes.find((x) => x.recipeId === saved1.recipeId)?.release.kind).toBe('ineligible');
+    expect(await svc.startRecipe({ commandId: cmd(), recipeId: saved1.recipeId })).toMatchObject({ outcome: 'rejected', code: 'NOT_ELIGIBLE' });
 
-    const appended = auth.appendText(r.draftId, { expectedRevision: auth.revision(r.draftId), text: LEMON_PASTED });
+    const appended = await auth.appendText(r.draftId, { expectedRevision: await auth.revision(r.draftId), text: LEMON_PASTED });
     expect((await auth.waitForJob(appended.job.id)).state).toBe('succeeded');
-    d = auth.getDraft(r.draftId);
+    d = await auth.getDraft(r.draftId);
     expect(d.sources.map((s) => [s.kind, s.origin, s.displayName])).toEqual([['pdf', 'upload', 'lemon-cake.pdf'], ['pastedText', 'cookPasted', 'pasted text']]);
     expect(d.draft.blockers).toEqual([]);
     expect(d.draft.content!.steps).toHaveLength(7);
@@ -266,10 +267,10 @@ describe('A-2 partial PDF + pasted missing steps (C-4)', () => {
     const lemons = d.draft.content!.ingredients.find((i) => i.name === 'Lemons, zest and juice')!;
     expect(lemons.uses.map((u) => [d.draft.content!.steps.find((s) => s.id === u.stepId)!.ordinal, u.proposedFunction?.labels])).toEqual([[4, ['flavor']], [6, ['acidity']]]);
     expect(lemons.uses.every((u) => u.swap.kind === 'none')).toBe(true);
-    const saved2 = auth.save(r.draftId, { expectedRevision: auth.revision(r.draftId) });
+    const saved2 = await auth.save(r.draftId, { expectedRevision: await auth.revision(r.draftId) });
     expect(saved2.release).toMatchObject({ kind: 'eligible', coverageSummary: expect.stringMatching(/^No reviewed changes on file · Prepared at import \(AI\): a card for 0 of \d+ uses$/) });
     expect(saved2.recipeVersionId).not.toBe(saved1.recipeVersionId);
-    expect(svc.startRecipe({ commandId: cmd(), recipeId: saved2.recipeId }).outcome).toBe('started');
+    expect((await svc.startRecipe({ commandId: cmd(), recipeId: saved2.recipeId })).outcome).toBe('started');
   });
 
   it('facts follow content across re-extraction and retire when their subject is gone', async () => {
@@ -277,22 +278,22 @@ describe('A-2 partial PDF + pasted missing steps (C-4)', () => {
     const r = await auth.createImport({ kind: 'pdf', bytes: lemonPdf, filename: 'lemon-cake.pdf' });
     if (r.status !== 202) throw new Error('import');
     await auth.waitForJob(r.job.id);
-    const step2 = auth.requirements(r.draftId);
+    const step2 = await auth.requirements(r.draftId);
     // no rule binds; batch 1's sugar and butter rules wait on facts this reading doesn't give (the creaming step has no
     // recognized technique), so they list them and never bind
     expect(step2.coverage.filter((c) => c.status === 'BOUND')).toEqual([]);
     expect([...new Set(step2.coverage.filter((c) => c.missing.length).map((c) => `${c.patternId}:${c.status}`))].sort()).toEqual(['caster_to_granulated:NEEDS_FACTS', 'confectioners_for_sugar_in_dry_mix:NEEDS_FACTS', 'oil_for_cold_butter_rub_in:NEEDS_FACTS']);
     expect([...new Set(step2.coverage.flatMap((c) => c.missing.map((m) => m.predicate)))].sort()).toEqual(['FUNCTION', 'TECHNIQUE']);
-    const core = (await import('../../src/authoring/drafts.ts')).coreHashes(auth.effective(r.draftId)!);
-    const step2Id = () => auth.effective(r.draftId)!.steps[1].stepId;   // ids are per reading; facts follow content
-    auth.assert(r.draftId, { expectedRevision: auth.revision(r.draftId), reviewer: 'owner', assertions: [{ subject: { kind: 'STEP', id: step2Id() }, predicate: 'TECHNIQUE', value: 'MIX_DOUGH', coreHash: core.get(`STEP|${step2Id()}`)! }] });
-    const ap = auth.appendText(r.draftId, { expectedRevision: auth.revision(r.draftId), text: LEMON_PASTED });
+    const core = (await import('../../src/authoring/drafts.ts')).coreHashes((await auth.effective(r.draftId))!);
+    const step2Id = async () => (await auth.effective(r.draftId))!.steps[1].stepId;   // ids are per reading; facts follow content
+    await auth.assert(r.draftId, { expectedRevision: await auth.revision(r.draftId), reviewer: 'owner', assertions: [{ subject: { kind: 'STEP', id: (await step2Id()) }, predicate: 'TECHNIQUE', value: 'MIX_DOUGH', coreHash: core.get(`STEP|${(await step2Id())}`)! }] });
+    const ap = await auth.appendText(r.draftId, { expectedRevision: await auth.revision(r.draftId), text: LEMON_PASTED });
     await auth.waitForJob(ap.job.id);
-    expect(getStep(auth.effective(r.draftId)!, step2Id())!.technique).toMatchObject({ techniqueId: 'MIX_DOUGH', prov: { status: 'REVIEWED', by: 'OWNER' } });
+    expect(getStep((await auth.effective(r.draftId))!, (await step2Id()))!.technique).toMatchObject({ techniqueId: 'MIX_DOUGH', prov: { status: 'REVIEWED', by: 'OWNER' } });
     // repair changes step 2's text → its fact retires (never silently re-pointed)
-    auth.repair(r.draftId, { expectedRevision: auth.revision(r.draftId), edits: [{ kind: 'MERGE_STEPS', stepIds: [step2Id(), auth.effective(r.draftId)!.steps[2].stepId] }] });
-    expect(getStep(auth.effective(r.draftId)!, step2Id())!.technique).toBeNull();   // the extraction proposed none; the retired fact no longer applies
-    expect(auth.effective(r.draftId)!.steps).toHaveLength(6);
+    await auth.repair(r.draftId, { expectedRevision: await auth.revision(r.draftId), edits: [{ kind: 'MERGE_STEPS', stepIds: [(await step2Id()), (await auth.effective(r.draftId))!.steps[2].stepId] }] });
+    expect(getStep((await auth.effective(r.draftId))!, (await step2Id()))!.technique).toBeNull();   // the extraction proposed none; the retired fact no longer applies
+    expect((await auth.effective(r.draftId))!.steps).toHaveLength(6);
   });
 });
 
@@ -333,9 +334,11 @@ describe('validator (buildDraft)', () => {
     const res = (await_compile(b.body.recipe));
     const cov = res.coverage.find((c) => c.patternId === 'split')!;
     expect(cov.status).toBe('NEEDS_FACTS');
-    // 11 facts this rescue reads (9 owner, 2 cook) — versus 69 recipe-wide blocks in the old build
-    expect(cov.missing.filter((m) => m.who === 'OWNER')).toHaveLength(9);
-    expect(cov.missing.filter((m) => m.who === 'COOK').map((m) => m.subject.id).sort()).toEqual([useOf('Arborio rice'), useOf('Dry white wine')].sort());
+    // 11 facts this rescue reads — versus 69 recipe-wide blocks in the old build. Since 2026-10-13 what an ingredient is and what a
+    // step does are the cook's to confirm for this recipe; what an ingredient does there stays approved content (the role table)
+    expect(cov.missing.filter((m) => m.who === 'OWNER').map((m) => m.predicate)).toEqual(['FUNCTION', 'FUNCTION', 'FUNCTION']);
+    expect(cov.missing.filter((m) => m.who === 'COOK')).toHaveLength(8);
+    expect(cov.missing.filter((m) => m.predicate === 'AMOUNT_EXACT').map((m) => m.subject.id).sort()).toEqual([useOf('Arborio rice'), useOf('Dry white wine')].sort());
     expect(cov.missing.find((m) => m.predicate === 'AMOUNT_EXACT' && m.expected.includes('G'))).toMatchObject({ who: 'COOK', have: 'ML, PROPOSED' });
   });
 });

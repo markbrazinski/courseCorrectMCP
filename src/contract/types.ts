@@ -3,8 +3,11 @@ import type { Rational } from '../domain/rational.ts';
 export type { Rational };
 
 /** Bump ONLY when evaluation semantics change. Code refactors never change pack identity (B27). */
-export const ENGINE_SEMANTICS = 3;   // 2: up to MAX_CHANGES_PER_RUN changes per run; a later change may not touch what an earlier one changed
+export const ENGINE_SEMANTICS = 4;   // 2: up to MAX_CHANGES_PER_RUN changes per run; a later change may not touch what an earlier one changed
                                      // 3: a refusal binding with no proposal classes (an import card's "no") refuses any replacement for its use
+                                     // 4: successive changes (2026-10-11): a reviewed plan whose frozen facts an earlier change altered, or whose
+                                     //    target an earlier change introduced, is re-bound against the current recipe from the pinned knowledge
+                                     //    release; token-local step edits compose, a whole-step rewrite of a changed step is a conflict
 export const MAX_CHANGES_PER_RUN = 4;   // owner decision 2026-10-02
 
 export type Id = string;
@@ -31,6 +34,8 @@ export interface Vocabulary {
   techniques: { techniqueId: Id; label: string }[];
   classes: { classId: Id; label: string }[];
   kinds: { kindId: Id; label: string; short: string; aliases: string[]; classes: Id[] }[];
+  /** absent: owner-approved (rule 6); a candidate vocabulary built from a proposed packet says it is pending */
+  approval?: 'OWNER_APPROVED_ENGINEERING' | 'COMMISSIONED_PENDING_OWNER_CONFIRMATION';
 }
 
 /** Reviewed import authority (content/approved/roles.json): roles per kind × technique, and technique cues for step text. */
@@ -38,6 +43,7 @@ export interface RoleTable {
   schema: 'cc-roles/1'; decisionRef: string;
   roles: { kindId: Id; techniqueId: Id; functions: Id[]; note: string }[];
   cues: Record<Id, string[]>;
+  approval?: 'OWNER_APPROVED_ENGINEERING' | 'COMMISSIONED_PENDING_OWNER_CONFIRMATION';
 }
 
 // ---------- recipe ----------
@@ -54,7 +60,23 @@ export interface Ingredient {
   ingredientId: Id; name: string;
   kind: { kindId: Id; prov: Provenance } | null;
   listed: Amount; listedProv: Provenance;
+  /** The sub-list heading the ingredient is listed under in the source ("For the sauce:"), as written; absent when none. */
+  group?: string;
+  /** Imports: the ingredient line as printed, when the reading's copy of it was found verbatim in the source. Evidence for identity
+   *  ("1 cup heavy cream" says what the ingredient is even when the reading named it oddly); never a source of amounts. */
+  sourceLine?: string;
+  /** A choice the line prints ("4 lb. cod or haddock"; "6 cups potatoes cut in 1/4-inch slices, or 4 cups potatoes cut in
+   *  3/4-inch cubes", 2026-10-13): one ingredient, never several required together. `choice`: the cook's (a draft fact), applied
+   *  on read; until made, options whose amounts differ keep the recipe from being started. */
+  options?: { name: string; text: string; amount: Amount; amountProv: Provenance }[];
+  choice?: number;
+  /** Set when an accepted change added this ingredient to a cooking session's recipe (absent: the recipe as saved). */
+  origin?: ChangeOrigin;
 }
+/** Why a use or ingredient is in the effective recipe: the accepted change that introduced it. Deterministic (no ids minted
+ *  at apply time), so a plan's hash is the same when shown and when applied: the change is the one that made version
+ *  `fromVersion + 1`. */
+export interface ChangeOrigin { fromVersion: number; patternId: Id; patternVersion: number; knowledgeReleaseId: string | null; replacesUseId: Id | null }
 export interface Step {
   stepId: Id; title: string | null; text: string;      // text holds {use:<id>} / {allowance:<id>} tokens
   technique: { techniqueId: Id; prov: Provenance } | null;
@@ -70,9 +92,16 @@ export interface IngredientUse {
   kind: 'ADD' | 'PREPARE'; preparesUseId: Id | null;
   amount: Amount; amountProv: Provenance;
   displayText: string | null;   // original wording rendered by {use:id}; null → amount + prepNote + name
+  /** The step names this use only through a group ("Combine the Rub ingredients"): these words, plain text in the step, never
+   *  a token. A change to the use leaves them true (the group is still combined), so the step needs no rewrite for it. */
+  groupText?: string;
   prepNote: string | null;
   functions: { functionId: Id; label: string | null; prov: Provenance }[];
   optional: boolean; allowance: Allowance | null;
+  origin?: ChangeOrigin;
+  /** What is done with this ingredient in its step, when the cook confirmed it (2026-10-13): a step can combine the dry ingredients
+   *  and mix a batter at once, and the step's one technique can't say both. Absent: the step's technique applies. */
+  technique?: { techniqueId: Id; prov: Provenance };
 }
 
 // ---------- patterns (content, reviewed) ----------
@@ -91,20 +120,32 @@ export type Predicate =
   | { kind: 'RECIPE_HAS_USE_OF_CLASS'; classId: Id; expect: boolean }
   // No hold between two steps: every step after `from` up to and including `to` has a REVIEWED technique outside
   // `techniques`, and no `cues` match its text. An unrecognized step is UNKNOWN, never PASS.
-  | { kind: 'NO_HOLD_BETWEEN'; from: SlotRef; to: SlotRef; techniques: Id[]; cues: string[] };
+  | { kind: 'NO_HOLD_BETWEEN'; from: SlotRef; to: SlotRef; techniques: Id[]; cues: string[] }
+  // The step's own wording (as read) matches one of `cues` (2026-10-13; e.g. an exception for a long simmer after thickening).
+  // Judged on the step text only: what the reading didn't take in can't make it PASS.
+  | { kind: 'STEP_TEXT_MATCHES'; slot: SlotRef; cues: string[];
+      /** also every later step (2026-10-13, corpus d02: a reading may split one sentence, "thicken … with flour" / "diluted with
+       *  cold water …; cook twenty minutes", across two steps): for exceptions about what happens after the step */
+      andLater?: true;
+      /** every step and every ingredient line (2026-10-13: "the recipe already uses a bouillon base", which an identity check
+       *  can only prove absent once every other ingredient is identified) */
+      wholeRecipe?: true };
 export interface Exception { exceptionId: Id; when: Predicate; reason: string }
 export type QuantityExpr =
   | { kind: 'LITERAL'; value: Rational; unit: Unit }
   | { kind: 'SCALE'; from: SlotRef | { listedTotalOf: SlotRef }; sourceUnit: Unit; factor: Rational; resultUnit: Unit;
       inputDomain: [Rational, Rational]; increment: Rational; maxAbsError: Rational; outputDomain: [Rational, Rational];
-      /** show a volume result in the recipe's spoons ("¾ tsp"); the value stays in ML */ display?: 'SPOONS' }
+      /** show a volume result in the recipe's spoons ("¾ tsp") or cups ("1½ cups"; 2026-10-13); the value stays in ML. A result
+       *  those can't say within 2% fails closed */ display?: 'SPOONS' | 'CUPS' }
   | { kind: 'UNRESOLVED'; unresolvedId: Id; question: string };
 export interface NewUseSpec {
   local: Id; ingredient: { slot: SlotRef } | { introduce: Id };
   at: SlotRef;
   qty: Id | 'CARRY_AS_WRITTEN';
   prepNote: string | null; functions: Id[];
-  allowance: { maxQty: Id; stopCondition: string; ifExhausted: string } | null;
+  /** maxQty: a quantity of this pattern. carryFrom: the "only if needed" allowance an earlier change put on that use, scaled by
+   *  `factor` (none there: none here); the only way a plan may replace a use that carries an allowance (2026-10-11). */
+  allowance: { maxQty: Id; stopCondition: string; ifExhausted: string } | { carryFrom: SlotRef; factor: Rational; stopCondition: string; ifExhausted: string } | null;
 }
 export type PatternOp =
   | { op: 'REPLACE_USE'; use: SlotRef; with: NewUseSpec }
@@ -132,7 +173,9 @@ interface PatternBase {
   schema: 'cc-pattern/1'; patternId: Id; version: number; title: string;
   target: UseSelector; slots: SlotSelector[];
   applicability: Predicate[]; exceptions: Exception[];
-  evidence: { quantityStatus: 'NONE' | 'PROVISIONAL' | 'SOURCED' | 'TRIALED'; basis: string };
+  evidence: { quantityStatus: 'NONE' | 'PROVISIONAL' | 'SOURCED' | 'TRIALED'; basis: string;
+    /** absent: owner-approved engineering content (rule 6). Never culinary validation; physical trials are recorded separately. */
+    approval?: 'OWNER_APPROVED_ENGINEERING' | 'COMMISSIONED_PENDING_OWNER_CONFIRMATION' };
 }
 export interface RecoveryPattern extends PatternBase {
   kind: 'RECOVERY';
@@ -152,6 +195,19 @@ export interface RefusalPattern extends PatternBase {
   answer?: string;
 }
 export type Pattern = RecoveryPattern | RefusalPattern;
+
+/**
+ * A sourced amount limit (2026-10-13; content, owner-approved like a pattern): sources use an ingredient of these classes only in
+ * small proportion to a liquid. An import card (never a reviewed pattern: those carry their own sourced quantities) that replaces
+ * a use doing one of `replacing` with an ingredient of these classes is not offered unless its amount is shown to be at most
+ * `maxFraction` of the replaced amount. Model output is never evidence here; only the use's role as read or approved is.
+ */
+export interface SourcedLimit {
+  schema: 'cc-limit/1'; limitId: Id; version: number; title: string;
+  classes: Id[]; replacing: Id[]; maxFraction: Rational;
+  /** said to the cook when a plan is not offered because of it */ reason: string;
+  evidence: { basis: string; approval?: 'OWNER_APPROVED_ENGINEERING' | 'COMMISSIONED_PENDING_OWNER_CONFIRMATION' };
+}
 
 // ---------- compiled (immutable) ----------
 export type Op =
@@ -206,6 +262,9 @@ export interface RecipePack {
   recipe: Recipe; recipeHash: Sha256; vocabularyHash: Sha256; patternSetHash: Sha256;
   bindings: Binding[]; coverage: CoverageEntry[]; warnings: string[];
   cards?: CardEntry[]; cardSetHash?: Sha256;                 // import-time swap cards (absent on approved content)
+  /** The knowledge release the pack was compiled with (part of packHash when present). Absent: saved before releases existed
+   *  (2026-10-11); such a pack is matched to a release only by its vocabulary and pattern-set hashes, never assigned one. */
+  knowledgeReleaseId?: string;
 }
 
 // ---------- runtime ----------
@@ -214,7 +273,13 @@ export interface RunSnapshot {
   revision: number; version: number; appliedRescueCount: number;
   recipe: Recipe;                                  // current version
   stepStatus: Record<Id, StepStatus>; useStatus: Record<Id, UseStatus>;
+  /** The release the run's pack is pinned to (null: unknown, so nothing can be re-bound). */
+  knowledgeReleaseId?: string | null;
+  /** Kinds the cook said they are out of, from the changes accepted in this run: no later plan may bring one back (a cycle). */
+  unavailableKinds?: Id[];
 }
+/** The pinned release's reviewed content the engine re-binds with when a frozen plan no longer describes the recipe. */
+export interface RebindKnowledge { releaseId: string; vocab: Vocabulary; patterns: Pattern[] }
 export type Notice =
   | { kind: 'STATED_AMOUNT_IGNORED'; text: string }
   | { kind: 'CLAIMED_PROGRESS_NOT_RECORDED'; text: string }
@@ -263,7 +328,8 @@ export type Question =
 export type RefusalCode =
   | 'NOT_FUNCTIONALLY_EQUIVALENT' | 'PROTECTED_WORK' | 'AFFECTED_USE_IN_PROGRESS' | 'AFFECTED_USE_UNACCOUNTED'
   | 'NO_SUPPORTED_RECOVERY' | 'NOT_APPLICABLE_NOW' | 'INSUFFICIENT_AVAILABILITY' | 'REFERENCE_NOT_IN_RECIPE'
-  | 'NOTHING_TO_CHANGE' | 'SUCCESSIVE_RESCUE_UNSUPPORTED' | 'CONFLICTS_WITH_EARLIER_CHANGE' | 'NOT_RELEASED';
+  | 'NOTHING_TO_CHANGE' | 'SUCCESSIVE_RESCUE_UNSUPPORTED' | 'CONFLICTS_WITH_EARLIER_CHANGE' | 'NOT_RELEASED'
+  | 'REINTRODUCES_UNAVAILABLE' | 'KNOWLEDGE_UNAVAILABLE';
 export type ProtectedFact =
   | { kind: 'STEP_STARTED' | 'STEP_COMPLETED'; stepId: Id; order: number }
   | { kind: 'USE_PARTIAL' | 'USE_ADDED'; useId: Id; label: string; order: number };
@@ -304,4 +370,6 @@ export interface EvaluationResult {
   notices: Notice[];
   speech: string;
   trace: DecisionTrace;
+  /** Plans re-bound against the current recipe for the target (successive changes): their coverage explains a refusal. */
+  rebound?: { releaseId: string; coverage: CoverageEntry[]; bindings: Binding[] };
 }

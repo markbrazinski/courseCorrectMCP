@@ -8,23 +8,24 @@ const VOLUME_ML: Record<string, Record<'US' | 'METRIC', Rational>> = {
   tsp: TSP, teaspoon: TSP, tbsp: TBSP, tablespoon: TBSP, cup: CUP,
 };
 const MASS_G: Record<string, Rational> = { g: rat(1), gram: rat(1), kg: rat(1000), oz: rat(28349523125, 1000000000), ounce: rat(28349523125, 1000000000), lb: rat(45359237, 100000), pound: rat(45359237, 100000) };
-const FRACTIONS: Record<string, string> = { '½': '1/2', '¼': '1/4', '¾': '3/4', '⅓': '1/3', '⅔': '2/3' };
-/** "1", "1/2", "½", "1 ½", "1 1/2", "1.5" → exact rational. */
+const FRACTIONS: Record<string, string> = { '½': '1/2', '¼': '1/4', '¾': '3/4', '⅓': '1/3', '⅔': '2/3', '⅛': '1/8' };
+/** "1", "1/2", "½", "1 ½", "1 1/2", "1.5", ".5" → exact rational. */
 function parseQuantity(q: string): Rational {
-  const parts = q.trim().split(/\s+/).map((p) => FRACTIONS[p] ?? p.replace(/^(\d+)([½¼¾⅓⅔])$/, (_m, a: string, f: string) => `${a} ${FRACTIONS[f]}`));
+  const parts = q.trim().split(/\s+/).map((p) => FRACTIONS[p] ?? p.replace(/^(\d+)([½¼¾⅓⅔⅛])$/, (_m, a: string, f: string) => `${a} ${FRACTIONS[f]}`).replace(/^\./, '0.'));
   return parts.join(' ').split(/\s+/).reduce((acc, p) => add(acc, parseRational(p)), rat(0));
 }
+/** Volume words whose size depends on the country (US or imperial pint, quart, gallon, gill) or that are one letter ("1 c", "1 T"):
+ *  never converted, never read as a count. */
+const UNSURE_UNITS = /^(?:pints?|pts?|quarts?|qts?|gallons?|gals?|gills?|[a-fh-km-z])$/i;
+const Q = String.raw`(?:\d+(?:[./]\d+)?|\.\d+|[½¼¾⅓⅔⅛])(?:\s*(?:\d+\/\d+|[½¼¾⅓⅔⅛]))?`;
 
-/** Parse an authored amount string ("120 ML", "30 g", "1 tbsp", "½ tsp", "1 clove", "1", "to taste"). */
-export function parseAmount(raw: string | { asWritten: string } | null, volumeSystem: 'US' | 'METRIC'): Amount {
-  if (raw === null) return { kind: 'UNSPECIFIED' };
-  if (typeof raw === 'object') return { kind: 'AS_WRITTEN', text: raw.asWritten };
-  const t = raw.trim();
-  if (/^to taste$/i.test(t)) return { kind: 'NOT_QUANTITY_BEARING', reason: 'TO_TASTE', text: t };
-  const m = /^((?:\d+(?:[./]\d+)?|[½¼¾⅓⅔])(?:\s*(?:\d+\/\d+|[½¼¾⅓⅔]))?)\s*([A-Za-z]+\.?)?$/.exec(t);
-  if (!m) return { kind: 'AS_WRITTEN', text: t };
+/** One measure: "120 ML", "30 g", "1 tbsp", "½ tsp", "1 cupful", "1 clove", "1". Null: not one measure. */
+function oneMeasure(t: string, volumeSystem: 'US' | 'METRIC'): Amount | null {
+  const m = new RegExp(`^(${Q})\\s*([A-Za-z]+\\.?)?$`).exec(t);
+  if (!m) return null;
   const value = parseQuantity(m[1]);
-  const u = (m[2] ?? '').toLowerCase().replace(/\.$/, '');
+  const u = (m[2] ?? '').toLowerCase().replace(/\.$/, '').replace(/ful(?:s)?$|fuls$/, '');   // "cupful", "tablespoonfuls": the measure itself
+  if (u && UNSURE_UNITS.test(u)) return { kind: 'AS_WRITTEN', text: t };
   const one = u.replace(/(es|s)$/, '') || u;
   if (u === 'ml' || one === 'milliliter' || one === 'millilitre') return { kind: 'EXACT', value, unit: 'ML', asWritten: t };
   if (u === 'l' || one === 'liter' || one === 'litre') return { kind: 'EXACT', value: mul(value, rat(1000)), unit: 'ML', asWritten: t };
@@ -33,6 +34,53 @@ export function parseAmount(raw: string | { asWritten: string } | null, volumeSy
   const vol = VOLUME_ML[u] ?? VOLUME_ML[one];
   if (vol) return { kind: 'EXACT', value: mul(value, vol[volumeSystem]), unit: 'ML', asWritten: t };
   return { kind: 'EXACT', value, unit: 'COUNT', asWritten: t };   // "1", "1 clove", "1 medium"
+}
+/** Two measures of one amount ("1 lb / 0.5 kg", "1/4 cup (60 ml)") may differ by rounding; past this they aren't one amount. */
+export const EQUIVALENT_TOLERANCE = 0.15;
+
+/**
+ * Parse an amount as written. One measure, or (2026-10-13 hardening):
+ * - an equivalent written two ways, "A (B)", "A / B", "A or B": A's value, the whole wording kept (never summed). Two measures of the
+ *   same kind that differ by more than EQUIVALENT_TOLERANCE aren't one amount: as written.
+ * - an addition, "A plus B" or "A + B" in one dimension ("1 tablespoon plus 2 teaspoons"): the sum, the wording kept.
+ * - a range, "2-3 tsp", "2 1/2-3tsp", "1 to 2 cups": RANGE (never exact).
+ * - a mixed number written with a hyphen, "1-1/2": 1½ (a range never ends below its start).
+ * Anything else, and a unit whose size isn't certain (pint, quart, a one-letter "c" or "T"), stays as written: never guessed.
+ */
+export function parseAmount(raw: string | { asWritten: string } | null, volumeSystem: 'US' | 'METRIC'): Amount {
+  if (raw === null) return { kind: 'UNSPECIFIED' };
+  if (typeof raw === 'object') return { kind: 'AS_WRITTEN', text: raw.asWritten };
+  const t = raw.trim();
+  if (/^to taste$/i.test(t)) return { kind: 'NOT_QUANTITY_BEARING', reason: 'TO_TASTE', text: t };
+  const asWritten: Amount = { kind: 'AS_WRITTEN', text: t };
+  const s = t.replace(/(\d)-(\d+\/\d+)(?!\d)/g, '$1 $2');   // "1-1/2" → "1 1/2"
+  const single = oneMeasure(s, volumeSystem);
+  if (single) return single.kind === 'EXACT' ? { ...single, asWritten: t } : asWritten;
+  const keep = (a: Amount): Amount => (a.kind === 'EXACT' ? { ...a, asWritten: t } : a);
+  // addition: both parts exact, one dimension
+  const plus = /^(.+?)\s*(?:\bplus\b|\+)\s*(.+)$/i.exec(s);
+  if (plus) {
+    const [a, b] = [oneMeasure(plus[1].trim(), volumeSystem), oneMeasure(plus[2].trim(), volumeSystem)];
+    return a?.kind === 'EXACT' && b?.kind === 'EXACT' && a.unit === b.unit && a.unit !== 'COUNT' ? { kind: 'EXACT', value: add(a.value, b.value), unit: a.unit, asWritten: t } : asWritten;
+  }
+  // equivalents: the first measure; a second one of the same kind must agree within the tolerance. A "/" between digits is a fraction.
+  const eq = /^(.+?)\s*\((.+)\)$/.exec(s) ?? /^(.+?)\s*(?:(?<!\d)\/|\/(?!\d)|\bor\b)\s*(.+)$/i.exec(s);
+  if (eq) {
+    const a = parseAmount(eq[1].trim(), volumeSystem), b = parseAmount(eq[2].trim(), volumeSystem);
+    if (a.kind !== 'EXACT' && a.kind !== 'RANGE') return asWritten;
+    if (b.kind === 'EXACT' && a.kind === 'EXACT' && a.unit === b.unit) {
+      const x = a.value.n / a.value.d, y = b.value.n / b.value.d;
+      if (Math.abs(x - y) > EQUIVALENT_TOLERANCE * Math.max(x, y)) return asWritten;
+    } else if (b.kind !== 'EXACT' && b.kind !== 'RANGE') return asWritten;
+    return a.kind === 'EXACT' ? keep(a) : { ...a, asWritten: t };
+  }
+  // range: "2-3 tsp", "2 1/2-3tsp", "1 to 2 cups"
+  const rg = new RegExp(`^(${Q})\\s*(?:-|–|to)\\s*(${Q})\\s*([A-Za-z]+\\.?)?$`, 'i').exec(s);
+  if (rg) {
+    const [lo, hi] = [oneMeasure(`${rg[1]} ${rg[3] ?? ''}`.trim(), volumeSystem), oneMeasure(`${rg[2]} ${rg[3] ?? ''}`.trim(), volumeSystem)];
+    if (lo?.kind === 'EXACT' && hi?.kind === 'EXACT' && lo.unit === hi.unit && lo.value.n * hi.value.d < hi.value.n * lo.value.d) return { kind: 'RANGE', min: lo.value, max: hi.value, unit: lo.unit, asWritten: t };
+  }
+  return asWritten;
 }
 
 /** A small volume in the recipe's teaspoons or tablespoons, to the nearest quarter ("¾ tsp", "1½ tsp", "1 tbsp"); null
@@ -43,6 +91,16 @@ export function spoonText(ml: Rational, vol: 'US' | 'METRIC'): string | null {
   for (const [unit, size] of [['tbsp', TBSP[vol]], ['tsp', TSP[vol]]] as const) {
     const q = Math.round((x / (size.n / size.d)) * 4);
     if (q > 0 && Math.abs(q / 4 - x / (size.n / size.d)) <= 0.02 * (q / 4) && (unit === 'tsp' || q % 4 === 0)) return `${glyph(q)} ${unit}`;
+  }
+  return null;
+}
+
+/** A volume as the recipe's cups, to the nearest quarter or third ("1½ cups", "⅔ cup"), within 2%; null otherwise. */
+export function cupText(ml: Rational, vol: 'US' | 'METRIC'): string | null {
+  const c = (ml.n / ml.d) / (CUP[vol].n / CUP[vol].d);
+  for (const [d, glyphs] of [[4, ['', '¼', '½', '¾']], [3, ['', '⅓', '⅔']]] as const) {
+    const q = Math.round(c * d), w = Math.floor(q / d), f = glyphs[q % d];
+    if (q > 0 && Math.abs(q / d - c) <= 0.02 * (q / d)) return `${w || ''}${f || (w ? '' : '0')} ${q / d > 1 ? 'cups' : 'cup'}`;
   }
   return null;
 }
@@ -65,7 +123,9 @@ export const stepOrder = (r: Recipe, stepId: Id) => r.steps.findIndex((s) => s.s
 export const getStep = (r: Recipe, stepId: Id) => r.steps.find((s) => s.stepId === stepId);
 export const getUse = (r: Recipe, useId: Id) => r.uses.find((u) => u.useId === useId);
 export const getIngredient = (r: Recipe, id: Id) => r.ingredients.find((i) => i.ingredientId === id);
-export const lowerFirst = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
+/** "Heavy cream" → "heavy cream" in a sentence; a name with a second capitalized word is a proper name ("Better Than Bouillon …",
+ *  "Diamond Crystal kosher salt") and stays as written. */
+export const lowerFirst = (s: string) => (/^\p{Lu}\p{Ll}*\s+\p{Lu}/u.test(s) ? s : s.charAt(0).toLowerCase() + s.slice(1));
 export const upperFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** First step (in order) that is not COMPLETED; null when all are done. */

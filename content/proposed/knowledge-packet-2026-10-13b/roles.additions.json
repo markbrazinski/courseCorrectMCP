@@ -1,0 +1,50 @@
+{
+  "_status": "PROPOSED knowledge packet 2026-10-13b item C (four role rows) and B cues (SIMMER; MIX_DOUGH \"batter\"). Not approved.",
+  "approval": "COMMISSIONED_PENDING_OWNER_CONFIRMATION",
+  "roles": [
+    {
+      "kindId": "chicken-stock",
+      "techniqueId": "SIMMER",
+      "functions": [
+        "LIQUID",
+        "FLAVOR"
+      ],
+      "note": "Stock simmered in a dish is its cooking liquid and much of its savoury flavour."
+    },
+    {
+      "kindId": "chicken-broth",
+      "techniqueId": "SIMMER",
+      "functions": [
+        "LIQUID",
+        "FLAVOR"
+      ],
+      "note": "Broth simmered in a dish is its cooking liquid and much of its savoury flavour."
+    },
+    {
+      "kindId": "sour-milk",
+      "techniqueId": "MIX_DOUGH",
+      "functions": [
+        "LIQUID",
+        "ACIDITY"
+      ],
+      "note": "Sour milk in a batter or dough is its liquid and the acid that baking soda reacts with."
+    },
+    {
+      "kindId": "buttermilk",
+      "techniqueId": "MIX_DOUGH",
+      "functions": [
+        "LIQUID",
+        "ACIDITY"
+      ],
+      "note": "Buttermilk in a batter or dough is its liquid and the acid that baking soda reacts with."
+    }
+  ],
+  "cues": {
+    "SIMMER": [
+      "\\bsimmer\\w*\\b"
+    ],
+    "MIX_DOUGH": [
+      "\\bbatter\\b"
+    ]
+  }
+}

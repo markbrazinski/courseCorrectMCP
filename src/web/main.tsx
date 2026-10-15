@@ -3,8 +3,8 @@
 import { StrictMode, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  activityFrom, activitySince, call, newId, onWebLog, prefs, startActivityScope, web, webEntries,
-  type Active, type ActivityEntry, type RecipeBookEntry, type RecipeContent, type Rejected, type SourceLine, type SpeechRef, type WireRun,
+  activityFrom, activitySince, call, newId, onWebLog, prefs, startActivityScope, startOver, web, webEntries,
+  type Active, type ActivityEntry, type ImportJob, type RecipeBookEntry, type RecipeContent, type Rejected, type SourceLine, type SpeechRef, type WireRun,
 } from './api.ts';
 import { Canvas } from './canvas.tsx';
 import { Review, type SourceRef } from './review.tsx';
@@ -30,7 +30,9 @@ function App() {
   const [actOpen, setActOpen] = useState(false);
   const [speechAvailable, setSpeechAvailable] = useState(false);
   const [speechOn, setSpeechOn] = useState(() => prefs.get('speech') !== 'off');   // on unless this viewer turned it off
-  useEffect(() => { void fetch('/health').then((r) => r.json()).then((h: { speech?: string }) => { setSpeechAvailable(h.speech === 'polly'); }).catch(() => undefined); }, []);
+  const [signedIn, setSignedIn] = useState(false);   // the deployed service: each sign-in is its own kitchen
+  const [agent, setAgent] = useState<{ endpoint: string; token: string; expiresAt: string } | null>(null);
+  useEffect(() => { void fetch('/health').then((r) => r.json()).then((h: { speech?: string; signIn?: boolean }) => { setSpeechAvailable(h.speech === 'polly'); setSignedIn(h.signIn === true); }).catch(() => undefined); }, []);
   const [typed, setTyped] = useState('');
   const [heardText, setHeardText] = useState<string | null>(null);
   const cooking = useRef<CookingHandle | null>(null);
@@ -110,8 +112,15 @@ function App() {
         <button onClick={goBook} style={{ background: 'none', border: 'none', padding: '4px 0', fontSize: 16, color: 'var(--cc-on-chrome)' }}>Recipe Book</button>
         <div style={{ flex: 1 }} />
         {run && screen.kind !== 'cooking' && <button onClick={async () => { await refresh(); setScreen({ kind: 'cooking' }); }} style={{ background: 'transparent', border: '1.5px solid var(--cc-on-chrome)', borderRadius: 20, padding: '7px 15px', fontSize: 15, fontWeight: 600, color: 'var(--cc-on-chrome)', whiteSpace: 'nowrap' }}>Resume cooking · {activeTitle}{curOrd ? ` · step ${curOrd}` : ''}</button>}
+        {signedIn && <button onClick={async () => { const r = await fetch('/mcp-token'); if (r.ok) setAgent(await r.json() as { endpoint: string; token: string; expiresAt: string }); }}
+          style={{ background: 'transparent', border: '1.5px solid var(--cc-on-chrome)', borderRadius: 6, padding: '7px 13px', fontSize: 15, color: 'var(--cc-on-chrome)', whiteSpace: 'nowrap' }}>MCP client</button>}
+        {signedIn && <button onClick={async () => {
+          if (!window.confirm('Start over with an empty kitchen? Recipes you saved and any cooking session stay with this kitchen, not the new one.')) return;
+          if (await startOver()) location.assign('/'); else window.alert("Couldn't start over right now. Nothing was changed.");
+        }} style={{ background: 'transparent', border: '1.5px solid var(--cc-on-chrome)', borderRadius: 6, padding: '7px 13px', fontSize: 15, color: 'var(--cc-on-chrome)', whiteSpace: 'nowrap' }}>Start over</button>}
         {!wide && !strip && <button onClick={() => setActOpen(!actOpen)} aria-expanded={actOpen} style={{ background: 'transparent', border: '1.5px solid var(--cc-on-chrome)', borderRadius: 6, padding: '7px 13px', fontSize: 15, color: 'var(--cc-on-chrome)' }}>Activity</button>}
       </header>
+      {agent && <AgentAccess {...agent} onClose={() => setAgent(null)} />}
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           {screen.kind === 'book' && <Book book={book} onOpen={(id) => setScreen({ kind: 'page', recipeId: id })} onAdd={() => setSheet({ step: 'pdf' })} />}
@@ -194,7 +203,7 @@ function RecipePage({ recipeId, savedOpen, active, activeTitle, onCanvas, onStar
         {savedOpen.length > 0 && <span style={{ fontWeight: 400 }}> Still open: {savedOpen.join(' ')}</span>}</div>}
       <div style={{ display: 'flex', gap: '10px 20px', alignItems: 'center', flexWrap: 'wrap' }}>
         <span className={`tag${rel.kind === 'eligible' ? '' : ' att'}`} style={{ alignSelf: 'center' }}>{rel.kind === 'eligible' ? 'Saved · can start' : 'Saved · can’t start yet'}</span>
-        <span style={{ flex: 1, minWidth: 240, fontSize: 15 }}>{rel.kind === 'eligible' ? rel.coverageSummary : rel.reasons[0]?.message}{!src && ' · demo recipe (engineering content)'}
+        <span style={{ flex: 1, minWidth: 240, fontSize: 15 }}>{rel.kind === 'eligible' ? rel.coverageSummary : rel.reasons[0]?.message}
           {v.version.createdFromDraft && <> · <button className="link" onClick={() => onCanvas(v.version.createdFromDraft!)}>See how it was read</button></>}</span>
         {other && <span className="muted" style={{ fontSize: 14 }}>You’re cooking {activeTitle}. Starting asks first.</span>}
         {/* archive through the delete_recipe MCP tool: off the book, history kept; refused by the server while it is being cooked */}
@@ -239,6 +248,9 @@ function SheetView({ sheet, setSheet, run, activeTitle, curOrd, onImported, onRe
   const [err, setErr] = useState<string | null>(null);
   const [reading, setReading] = useState(false);
   const [drag, setDrag] = useState(false);
+  // the document holds several recipes (the job waits for a choice); a failed job that may be run again (same job, nothing re-read)
+  const [choice, setChoice] = useState<{ jobId: string; choices: { index: number; title: string }[] } | null>(null);
+  const [retryId, setRetryId] = useState<string | null>(null);
   const key = useRef(newId());
   const uploaded = useRef<{ key: string; file: File; sourceDocId: string } | null>(null);   // a retry reuses the same upload and command
   const box = useRef<HTMLDivElement>(null);
@@ -277,15 +289,44 @@ function SheetView({ sheet, setSheet, run, activeTitle, curOrd, onImported, onRe
         }
         source = { kind: 'upload', sourceDocId: uploaded.current.sourceDocId };
       } else source = body;
-      type Imported = { outcome: 'imported' | 'importing' | 'failed' | 'rejected'; message?: string; job?: { id: string; failure: { message: string } | null }; draft?: { draftId: string } | null };
+      type Imported = { outcome: 'imported' | 'importing' | 'needsChoice' | 'failed' | 'rejected'; message?: string; job?: ImportJob };
       let r: Imported;
       try { r = await call<Imported>('import_recipe', { commandId: key.current, source }); }
       catch { setErr('No response from CourseCorrect. Try again; the same request is reused, so nothing is read twice.'); return; }
       if (r.outcome === 'rejected') { setErr(r.message ?? 'That couldn’t be read.'); key.current = newId(); return; }
-      if (r.outcome === 'failed' || !r.job || !r.draft) { setErr(r.job?.failure?.message ?? 'We couldn’t find a recipe in that document.'); key.current = newId(); return; }
-      onImported(r.draft.draftId, r.job.id);
+      await settle(r.job);   // the tool returns once the import is accepted; the reading finishes here
     } finally { setReading(false); }
   };
+  /** Follow a job to its end: imported (open the review), a choice of recipe, or a failure (retryable or not). */
+  const settle = async (j: ImportJob | undefined) => {
+    let job = j;
+    while (job && (job.state === 'queued' || job.state === 'running')) { await new Promise((ok) => setTimeout(ok, 400)); job = (await web<{ job: ImportJob }>('GET', `/imports/${job.id}`)).data.job; }
+    if (job?.state === 'needsChoice') { setChoice({ jobId: job.id, choices: job.choices ?? [] }); return; }
+    if (!job || job.state === 'failed') { setErr(job?.failure?.message ?? 'We couldn’t find a recipe in that document.'); setRetryId(job?.canRetry ? job.id : null); if (!job?.canRetry) key.current = newId(); return; }
+    onImported(job.draftId, job.id);
+  };
+  const again = async (path: string, body: object, label: string) => {
+    setReading(true); setErr(null); setRetryId(null); setChoice(null);
+    try {
+      const r = await web<{ job?: ImportJob; error?: { code: string } }>('POST', path, body, {}, label);
+      if (!r.data.job) { setErr(r.data.error?.code === 'RETRY_LIMIT' ? 'This import has been tried as many times as it can be. Paste the recipe text instead.' : 'That didn’t start. Try again.'); return; }
+      await settle(r.data.job);
+    } finally { setReading(false); }
+  };
+  /** The bundled sample (owner-authored cream scones): read exactly like a PDF the cook chose, so no recipe of your own is needed. */
+  const useSample = async () => {
+    setErr(null);
+    const r = await fetch('/sample/scones-explicit.pdf');
+    if (!r.ok) { setErr('The sample recipe isn’t available on this server. Choose a PDF, or paste the recipe text.'); return; }
+    const f = new File([await r.blob()], 'scones-explicit.pdf', { type: 'application/pdf' });
+    setFile(f); key.current = newId();
+    await submit(f, { 'x-filename': encodeURIComponent(f.name) });
+  };
+  const choiceBox = choice && <div role="group" aria-label="Choose a recipe" data-testid="recipe-choice" style={{ display: 'flex', flexDirection: 'column', gap: 8, border: '1.5px solid var(--cc-border-strong)', borderRadius: 12, padding: '14px 16px' }}>
+            <strong style={{ fontSize: 18 }}>This document holds {choice.choices.length} recipes. Which one do you want?</strong>
+            <span className="muted" style={{ fontSize: 15 }}>Only the one you choose is read. Nothing from the others is mixed in.</span>
+            {choice.choices.map((c) => <button key={c.index} className="b" style={{ alignSelf: 'flex-start' }} disabled={reading} onClick={() => void again(`/imports/${choice.jobId}/choose`, { index: c.index }, `Read “${c.title}”`)}>{c.title}</button>)}
+          </div>;
   const title = sheet.step === 'switch' ? 'Start a different recipe?' : sheet.step === 'paste' ? 'Paste recipe text' : 'Add a recipe';
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(42,33,27,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, zIndex: 30 }} onKeyDown={onKey}>
@@ -300,16 +341,24 @@ function SheetView({ sheet, setSheet, run, activeTitle, curOrd, onImported, onRe
           </label> : <div style={{ display: 'flex', gap: 14, alignItems: 'center', border: '1.5px solid var(--cc-border-strong)', borderRadius: 12, padding: '14px 16px', background: 'var(--cc-surface-2)' }}>
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}><strong style={{ fontSize: 18, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.name}</strong><span className="muted">PDF · {Math.max(1, Math.round(file.size / 1024))} KB</span></div>
             <button className="link" disabled={reading} onClick={() => { setFile(null); setErr(null); }}>Change file</button></div>}
-          {err && <div role="alert" className="attention" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><strong style={{ fontSize: 17 }}>{err}</strong>{file && <span>Your file is still selected. Choose a different file, or paste the recipe text.</span>}<button className="b sm" style={{ alignSelf: 'flex-start' }} onClick={() => setSheet({ step: 'paste' })}>Paste text instead</button></div>}
+          {!file && <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span className="muted" style={{ fontSize: 15 }}>No recipe handy? Try ours:</span>
+            <button data-testid="sample-chip" disabled={reading} onClick={() => void useSample()}
+              style={{ border: '1.5px solid var(--cc-border-strong)', borderRadius: 999, background: 'var(--cc-surface-2)', padding: '7px 15px', fontSize: 15, fontWeight: 600, whiteSpace: 'nowrap' }}>Cream Scones · sample PDF</button>
+          </div>}
+          {choiceBox}
+          {err && <div role="alert" className="attention" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><strong style={{ fontSize: 17 }}>{err}</strong>{file && <span>Your file is still selected. Choose a different file, or paste the recipe text.</span>}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>{retryId && <button className="b sm primary" disabled={reading} onClick={() => void again(`/imports/${retryId}/retry`, {}, 'Try the import again')}>Try again</button>}<button className="b sm" style={{ alignSelf: 'flex-start' }} onClick={() => setSheet({ step: 'paste' })}>Paste text instead</button></div></div>}
           {reading && <div role="status" style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 17, fontWeight: 700 }}><span className="dots"><i /><i /><i /></span>Uploading and reading {file?.name}…</div>}
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <button className="b primary" disabled={!file || reading} onClick={() => file && void submit(file, { 'x-filename': file.name })}>Upload and read</button>
+            <button className="b primary" disabled={!file || reading} onClick={() => file && void submit(file, { 'x-filename': encodeURIComponent(file.name) })}>Upload and read</button>
             <button className="link" disabled={reading} onClick={() => setSheet({ step: 'paste' })}>Or paste the recipe text</button></div>
         </>}
         {sheet.step === 'paste' && <>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 15, fontWeight: 600 }}>Recipe text
             <textarea value={text} readOnly={reading} onChange={(e) => setText(e.target.value)} placeholder="Paste the whole recipe: title, ingredients and steps." style={{ width: '100%', height: 210, border: '1.5px solid var(--cc-border-strong)', borderRadius: 8, padding: 10, fontSize: 15, resize: 'vertical' }} /></label>
-          {err && <div role="alert" className="attention" style={{ fontWeight: 700 }}>{err}</div>}
+          {choiceBox}
+          {err && <div role="alert" className="attention" style={{ fontWeight: 700, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>{err}{retryId && <button className="b sm primary" disabled={reading} onClick={() => void again(`/imports/${retryId}/retry`, {}, 'Try the import again')}>Try again</button>}</div>}
           {reading && <div role="status" style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 17, fontWeight: 700 }}><span className="dots"><i /><i /><i /></span>Reading the text…</div>}
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}><button className="b primary" disabled={!text.trim() || reading} onClick={() => void submit({ kind: 'text', text } as never, {})}>Read this recipe</button><button className="link" disabled={reading} onClick={() => setSheet({ step: 'pdf' })}>Back to PDF</button></div>
         </>}
@@ -331,15 +380,19 @@ function useActivity() {
   const [flash, setFlash] = useState<number | null>(null);
   useEffect(() => onWebLog(() => setWebLog(webEntries().slice())), []);
   useEffect(() => {
-    let last = 0, alive = true;
+    let last = 0, alive = true, input = Date.now();
+    const seen = () => { input = Date.now(); };
+    for (const e of ['pointerdown', 'keydown', 'focus'] as const) window.addEventListener(e, seen);
     const tick = async () => {
+      // ponytail: each poll is a paid request when deployed, so a hidden tab or one left alone for 10 minutes stops asking until it's used again
+      if (document.hidden || Date.now() - input > 10 * 60_000) return;
       const add = await activitySince(last).catch(() => []);
       if (!alive) return;
       if (add.length) { last = add[add.length - 1].seq; setMcp((m) => [...add.reverse(), ...m].slice(0, 200)); setFlash(last); window.setTimeout(() => setFlash(null), 2400); }
     };
     void tick();
     const t = window.setInterval(() => void tick(), 1200);
-    return () => { alive = false; window.clearInterval(t); };
+    return () => { alive = false; window.clearInterval(t); for (const e of ['pointerdown', 'keydown', 'focus'] as const) window.removeEventListener(e, seen); };
   }, []);
   return { mcp: mcp.filter((e) => e.seq > activityFrom()), webLog, flash };
 }
@@ -469,3 +522,23 @@ function VoiceBar({ state, supported, lastSpoken, audio, onMic, onStopSpeaking, 
 }
 
 createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);
+
+/** Connect an MCP client to this kitchen: the endpoint and a bearer token for this workspace (deployed service only). */
+function AgentAccess({ endpoint, token, expiresAt, onClose }: { endpoint: string; token: string; expiresAt: string; onClose: () => void }) {
+  const close = useRef<HTMLButtonElement>(null);
+  useEffect(() => { close.current?.focus(); const k = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, [onClose]);
+  const copy = (t: string) => { void navigator.clipboard?.writeText(t); };
+  const row = (label: string, value: string) => <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+    <span style={{ fontSize: 13, fontWeight: 600 }}>{label}</span>
+    <div style={{ display: 'flex', gap: 8 }}><code style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere', fontSize: 13, padding: '6px 8px', border: '1px solid var(--cc-border)', borderRadius: 6, fontFamily: 'var(--cc-font-mono)' }}>{value}</code>
+      <button className="b sm" onClick={() => copy(value)} aria-label={`Copy ${label}`}>Copy</button></div></div>;
+  return <div role="dialog" aria-modal="true" aria-labelledby="agent-title" onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)', display: 'grid', placeItems: 'center', padding: 16, zIndex: 50 }}>
+    <div className="card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560, width: '100%', display: 'flex', flexDirection: 'column', gap: 14, background: 'var(--cc-surface)', color: 'var(--cc-text)' }}>
+      <h2 id="agent-title" style={{ fontSize: 22, margin: 0 }}>Connect an MCP client to this kitchen</h2>
+      <span className="muted" style={{ fontSize: 14 }}>Streamable HTTP. The client sees and changes this kitchen only, with the same eight tools the companion uses. Keep the token private; it works until {new Date(expiresAt).toLocaleDateString()}.</span>
+      {row('Endpoint', endpoint)}
+      {row('Header', `Authorization: Bearer ${token}`)}
+      {row('Example (MCP Inspector)', `npx @modelcontextprotocol/inspector --cli ${endpoint} --transport http --header "Authorization: Bearer ${token}" --method tools/list`)}
+      <button ref={close} className="b" onClick={onClose} style={{ alignSelf: 'flex-end' }}>Close</button>
+    </div></div>;
+}

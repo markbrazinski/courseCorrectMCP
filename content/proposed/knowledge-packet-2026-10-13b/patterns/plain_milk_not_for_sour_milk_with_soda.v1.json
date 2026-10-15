@@ -1,0 +1,40 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "REFUSAL",
+  "patternId": "plain_milk_not_for_sour_milk_with_soda",
+  "version": 1,
+  "title": "Plain milk for sour milk or buttermilk that baking soda depends on",
+  "target": {
+    "ingredientClass": "acidic-dairy",
+    "performsAll": [
+      "LIQUID",
+      "ACIDITY"
+    ],
+    "stepTechnique": "MIX_DOUGH"
+  },
+  "slots": [],
+  "applicability": [
+    {
+      "kind": "RECIPE_HAS_USE_OF_CLASS",
+      "classId": "baking-soda",
+      "expect": true
+    }
+  ],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "NONE",
+    "approval": "COMMISSIONED_PENDING_OWNER_CONFIRMATION",
+    "basis": "Knowledge packet 2026-10-13 item E3, PROPOSED (not approved). Research plain_milk_for_buttermilk_with_soda (SOURCE_SUPPORTED): King Arthur SRC-CM-26#f (don't use plain milk with soda), SRC-CM-26#e (soda-leavened cake darker and denser with plain milk), SRC-CM-26#d (plain-milk pancakes rose less); SRC-CM-35#a, SRC-CM-15#f (soda needs acid). Scope: baking soda in the recipe (applicability). Known conflict kept: King Arthur says a small amount (1/4 cup in a chocolate cake) can probably be swapped; no source gives a threshold."
+  },
+  "proposal": {
+    "classes": [
+      "milk"
+    ],
+    "match": "EQUALS"
+  },
+  "response": "NOT_FUNCTIONALLY_EQUIVALENT",
+  "requiredFunctionLabel": "acidity",
+  "text": "Plain milk can't stand in for it as it is: the baking soda works by reacting with its acid, and without that it rises less and comes out darker and denser. Milk soured with lemon juice does the job.",
+  "scopeNote": "About plain milk for all of it where the recipe's baking soda relies on its acid. King Arthur notes a small amount can probably be swapped, but no source gives a limit.",
+  "answer": "on its own can't give the baking soda its acid"
+}

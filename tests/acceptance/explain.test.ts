@@ -8,19 +8,19 @@ import { Service } from '../../src/service/commands.ts';
 import { recordedInterpreter } from '../../src/service/interpret.ts';
 import { RECORDED_INTENTS } from '../fixtures/recorded-intents.ts';
 import { recordedExplainer, rejectAnswer } from '../../src/service/explain.ts';
-import { cmd, content, newService, ROOT, startAt, vocab } from '../helpers.ts';
+import { cmd, content, newService, ROOT, startAt, vocab, newKv, newWs } from '../helpers.ts';
 import { RECIPE } from '../fixtures/ids.ts';
 
 const MILK_BUTTER = "I'm out of heavy cream. Can I use milk and butter?";
 const WHIP = "I'm out of heavy cream. Can I use milk and butter to whip instead?";
-const withAnswer = (answer: string) => new Service({ dbPath: join(mkdtempSync(join(tmpdir(), 'ccmcp-exp-')), 'db'), content, interpreter: recordedInterpreter(RECORDED_INTENTS), explainer: recordedExplainer({ [MILK_BUTTER]: answer }) });
+const withAnswer = (answer: string) => new Service({ kv: newKv(join(mkdtempSync(join(tmpdir(), 'ccmcp-exp-')), 'db')), ws: newWs(), content, interpreter: recordedInterpreter(RECORDED_INTENTS), explainer: recordedExplainer({ [MILK_BUTTER]: answer }) });
 const authored = (JSON.parse(readFileSync(join(ROOT, 'content/approved/patterns/whip_needs_cream.v1.json'), 'utf8')) as { text: string }).text;
 
 async function ask(svc: Service, doneSteps: number, text: string) {
   let run = await startAt(svc, RECIPE['shortcake.demo'], null);
-  const steps = svc.getActiveRecipe().recipe!.steps;
+  const steps = (await svc.getActiveRecipe()).recipe!.steps;
   for (const s of steps.slice(0, doneSteps)) {
-    const r = svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: s.id, progress: 'done' });
+    const r = await svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: s.id, progress: 'done' });
     if (r.outcome !== 'recorded') throw new Error(JSON.stringify(r));
     run = r.run;
   }
@@ -42,7 +42,7 @@ describe('refusal why (deterministic) and its answer', () => {
     expect(ev.answer).toMatchObject({ source: 'template' });
     expect(ev.answer.text).toMatch(/^No\. /);
     expect(ev.speech.text).toBe(`${ev.answer.text} ${'Your recipe is unchanged. Step 4 still needs 180 ML heavy cream.'}`);
-    expect(svc.speechText({ evaluationId: ev.id })).toBe(ev.speech.text);       // Polly reads exactly this
+    expect(await svc.speechText({ evaluationId: ev.id })).toBe(ev.speech.text);       // Polly reads exactly this
   });
 
   it('shortcake step 6: the authored whip reason is kept verbatim in the facts', async () => {
@@ -57,8 +57,8 @@ describe('refusal why (deterministic) and its answer', () => {
   it('a state refusal is "not right now" and keeps the engine message', async () => {
     const { svc } = newService();
     let run = await startAt(svc, RECIPE['risotto.demo'], 'risotto.step5');
-    const step5 = svc.getActiveRecipe().recipe!.steps[4];
-    const r = svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: step5.id, progress: 'started' });
+    const step5 = (await svc.getActiveRecipe()).recipe!.steps[4];
+    const r = await svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: step5.id, progress: 'started' });
     if (r.outcome !== 'recorded') throw new Error('progress');
     run = r.run;
     const ev = await svc.evaluateRescue({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, utterance: { text: "I don't have any white wine. Can I use lemon juice?", channel: 'typed' } });

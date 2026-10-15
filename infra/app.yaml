@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CourseCorrect compute for one environment: the web function behind a public HTTPS Function URL (the companion, /mcp
+  and the HTTP routes; the app's own sign-in guards everything but /health), the import worker (asynchronous, no URL),
+  their execution role and their log groups. Deleting this stack removes compute and logs and keeps the data stack.
+  No always-on charge: requests, duration and logs only.
+
+Parameters:
+  Env: { Type: String, AllowedPattern: '[a-z][a-z0-9-]{1,20}' }
+  TableName: { Type: String }
+  KnowledgeTableName: { Type: String, Description: 'Knowledge releases (read only for the functions)' }
+  BucketName: { Type: String }
+  CodeKey: { Type: String, Description: 'S3 key of the deployment zip in the data bucket' }
+  Version: { Type: String, Description: 'Build identity shown by status' }
+  SessionKey: { Type: String, NoEcho: true, Description: 'base64, at least 32 bytes; signs session cookies' }
+  AccessCodeSha256: { Type: String, NoEcho: true, Description: 'comma-separated SHA-256 hex of the judge access codes' }
+  Live: { Type: String, AllowedValues: ['0', '1'], Default: '0' }
+  Extractor: { Type: String, AllowedValues: [none, live], Default: none }
+  Analyzer: { Type: String, AllowedValues: [none, live], Default: none }
+  Interpreter: { Type: String, AllowedValues: [none, nova], Default: none }
+  Explainer: { Type: String, AllowedValues: [none, nova], Default: none }
+  Speech: { Type: String, AllowedValues: ['off', polly], Default: 'off' }
+  Ocr: { Type: String, AllowedValues: ['off', textract], Default: 'off', Description: 'Textract text detection for PDF pages without readable text' }
+  LogRetentionDays: { Type: Number, AllowedValues: [1, 3, 5, 7, 14, 30], Default: 14 }
+  PublicOrigin: { Type: String, Default: '', Description: 'Optional extra browser origin (a custom domain in front of the URL)' }
+  WorkerConcurrency: { Type: Number, MinValue: 1, MaxValue: 10, Default: 2, Description: 'Imports read at once; more wait queued (Bedrock throttled 3 at once, 2026-10-13)' }
+
+Conditions:
+  IsLive: !Equals [!Ref Live, '1']
+  IsOcr: !And [!Condition IsLive, !Equals [!Ref Ocr, textract]]
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cc-${Env}-fn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: cc-app
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: [!Sub '${WebLogGroup.Arn}', !Sub '${WorkerLogGroup.Arn}']
+              - Effect: Allow   # the workspace store: item reads and conditional writes only (no Scan, no table admin)
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:DeleteItem, dynamodb:UpdateItem, dynamodb:Query, dynamodb:ConditionCheckItem]
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
+              - Effect: Allow   # knowledge releases: read only (publishing is the owner's, through npm run cc -- knowledge)
+                Action: [dynamodb:GetItem, dynamodb:Query]
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${KnowledgeTableName}
+              - Effect: Allow   # the Polly clip cache
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}/speech/*
+              - Effect: Allow   # without ListBucket a missing clip reads as AccessDenied instead of NoSuchKey
+                Action: s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}
+                Condition: { StringLike: { 's3:prefix': 'speech/*' } }
+              - Effect: Allow   # the web function hands queued imports to the worker
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:cc-${Env}-worker
+              - !If
+                - IsLive
+                - Effect: Allow   # Nova 2 Lite through the US geographic inference profile (routes to us-east-1, us-east-2, us-west-2)
+                  Action: bedrock:InvokeModel
+                  Resource:
+                    - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-2-lite-v1:0
+                    - !Sub arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/amazon.nova-2-lite-v1:0
+                    - !Sub arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/amazon.nova-2-lite-v1:0
+                    - !Sub arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/amazon.nova-2-lite-v1:0
+                - !Ref AWS::NoValue
+              - !If
+                - IsLive
+                - { Effect: Allow, Action: polly:SynthesizeSpeech, Resource: '*' }
+                - !Ref AWS::NoValue
+              - !If   # OCR (2026-10-13): text detection only (no AnalyzeDocument: no Forms, Tables or Queries); Textract has no resource-level ARNs for these
+                - IsOcr
+                - { Effect: Allow, Action: [textract:StartDocumentTextDetection, textract:GetDocumentTextDetection], Resource: '*' }
+                - !Ref AWS::NoValue
+              - !If   # the PDF held for OCR: written at upload, read by Textract as this role, deleted when the import is done
+                - IsOcr
+                - { Effect: Allow, Action: [s3:PutObject, s3:GetObject, s3:DeleteObject], Resource: !Sub 'arn:${AWS::Partition}:s3:::${BucketName}/ocr-input/*' }
+                - !Ref AWS::NoValue
+      Tags:
+        - { Key: app, Value: coursecorrect }
+        - { Key: env, Value: !Ref Env }
+
+  # Declared here (not left to Lambda) so retention applies and deleting the stack deletes them.
+  WebLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties: { LogGroupName: !Sub '/aws/lambda/cc-${Env}-web', RetentionInDays: !Ref LogRetentionDays }
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties: { LogGroupName: !Sub '/aws/lambda/cc-${Env}-worker', RetentionInDays: !Ref LogRetentionDays }
+
+  WebFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub cc-${Env}-web
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      Handler: index.handler
+      Code: { S3Bucket: !Ref BucketName, S3Key: !Ref CodeKey }
+      MemorySize: 1024
+      Timeout: 60
+      Role: !GetAtt Role.Arn
+      LoggingConfig: { LogGroup: !Ref WebLogGroup, LogFormat: Text }
+      Environment:
+        Variables:
+          NODE_OPTIONS: --disable-warning=ExperimentalWarning
+          CC_VERSION: !Ref Version
+          CC_TABLE: !Ref TableName
+          CC_KNOWLEDGE_TABLE: !Ref KnowledgeTableName
+          CC_BUCKET: !Ref BucketName
+          CC_SESSION_KEY: !Ref SessionKey
+          CC_ACCESS_CODE_SHA256: !Ref AccessCodeSha256
+          CC_AWS_IDENTITY: !Sub role/cc-${Env}-fn
+          CC_LIVE: !Ref Live
+          CC_EXTRACTOR: !Ref Extractor
+          CC_ANALYZER: !Ref Analyzer
+          CC_INTERPRETER: !Ref Interpreter
+          CC_EXPLAINER: !Ref Explainer
+          CC_SPEECH: !Ref Speech
+          CC_OCR: !Ref Ocr
+          CC_PUBLIC_ORIGIN: !Ref PublicOrigin
+          CC_WORKER_FUNCTION: !Sub cc-${Env}-worker
+      Tags:
+        - { Key: app, Value: coursecorrect }
+        - { Key: env, Value: !Ref Env }
+
+  WorkerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub cc-${Env}-worker
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      Handler: index.handler
+      Code: { S3Bucket: !Ref BucketName, S3Key: !Ref CodeKey }
+      MemorySize: 1024
+      Timeout: 600   # OCR 180 s + reading 90 s + swap analysis 120 s + one correction round 120 s, with margin; a run starts no paid call it can't finish in 540 s
+      # bounded scheduling: at most this many imports run at once; Lambda holds the others' events and starts them as a slot frees
+      # (an event throttled for concurrency is retried by Lambda's own queue, up to MaximumEventAgeInSeconds below; the job reads queued)
+      ReservedConcurrentExecutions: !Ref WorkerConcurrency
+      Role: !GetAtt Role.Arn
+      LoggingConfig: { LogGroup: !Ref WorkerLogGroup, LogFormat: Text }
+      Environment:
+        Variables:
+          NODE_OPTIONS: --disable-warning=ExperimentalWarning
+          CC_VERSION: !Ref Version
+          CC_TABLE: !Ref TableName
+          CC_KNOWLEDGE_TABLE: !Ref KnowledgeTableName
+          CC_BUCKET: !Ref BucketName
+          CC_SESSION_KEY: !Ref SessionKey
+          CC_ACCESS_CODE_SHA256: !Ref AccessCodeSha256
+          CC_AWS_IDENTITY: !Sub role/cc-${Env}-fn
+          CC_LIVE: !Ref Live
+          CC_EXTRACTOR: !Ref Extractor
+          CC_ANALYZER: !Ref Analyzer
+          CC_INTERPRETER: !Ref Interpreter
+          CC_EXPLAINER: !Ref Explainer
+          CC_SPEECH: !Ref Speech
+          CC_OCR: !Ref Ocr
+          CC_IS_WORKER: '1'
+      Tags:
+        - { Key: app, Value: coursecorrect }
+        - { Key: env, Value: !Ref Env }
+
+  # Never retried by Lambda (each model call is reserved and paid once); a job not started within 10 minutes is dropped,
+  # and the app reports it failed after 11 (drafts.ts JOB_LIMITS). A duplicate delivery finds the job claimed.
+  WorkerInvokeConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref WorkerFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 0
+      MaximumEventAgeInSeconds: 600
+
+  WebUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt WebFunction.Arn
+      AuthType: NONE   # public HTTPS; the app's sign-in (gate.ts) guards every route but /health and the sign-in itself
+      InvokeMode: BUFFERED
+  # Public function URLs need both permissions (Lambda, October 2025).
+  WebUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+  WebInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebFunction
+      Action: lambda:InvokeFunction
+      Principal: '*'
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  Url: { Value: !GetAtt WebUrl.FunctionUrl }
+  WebFunction: { Value: !Ref WebFunction }
+  WorkerFunction: { Value: !Ref WorkerFunction }
+  Role: { Value: !Ref Role }
+  Version: { Value: !Ref Version }

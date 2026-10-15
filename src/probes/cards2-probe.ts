@@ -18,6 +18,8 @@ import { novaAnalyzer, recordedAnalyzer, SWAP_SYSTEM, SWAP_VERSION, swapPromptId
 import { hash, sha256 } from '../domain/rational.ts';
 import { stepOrder } from '../domain/recipe.ts';
 import { Service } from '../service/commands.ts';
+import { SqliteKv } from '../service/kv-sqlite.ts';
+import { modelRows } from './records.ts';
 import { loadContent } from '../service/content.ts';
 import { noneInterpreter } from '../service/interpret.ts';
 import { SCONE_EXPLICIT_READING } from '../../tests/fixtures/demo-sources.ts';
@@ -70,19 +72,19 @@ function mixed(readings: Record<string, unknown>, other: Extractor): Extractor {
 }
 
 async function cook(svc: Service, recipeId: string, planId: string | undefined) {
-  const st = svc.startRecipe({ commandId: `p2-start-${Date.now()}`, recipeId });
+  const st = await svc.startRecipe({ commandId: `p2-start-${Date.now()}`, recipeId });
   if (st.outcome !== 'started') return { pass: false, detail: JSON.stringify(st).slice(0, 200) };
   let run = st.run;
-  for (const s of st.recipe.steps.slice(0, 2)) { const r = svc.recordProgress({ commandId: `p2-${s.id}`, runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: s.id, progress: 'done' }); if (r.outcome !== 'recorded') return { pass: false, detail: r.code }; run = r.run; }
+  for (const s of st.recipe.steps.slice(0, 2)) { const r = await svc.recordProgress({ commandId: `p2-${s.id}`, runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: s.id, progress: 'done' }); if (r.outcome !== 'recorded') return { pass: false, detail: r.code }; run = r.run; }
   const cream = st.recipe.ingredients.find((i) => /cream/i.test(i.name))!;
-  const ask = (prev?: { id: string; answers: { questionId: string; value: 'yes' }[] }) => svc.evaluateRescue({ commandId: `p2-e-${Date.now()}-${Math.random()}`, runId: run.id, epoch: run.epoch, expectedRevision: run.revision, missingIngredientId: cream.id, proposedKindIds: ['whole-milk', 'unsalted-butter'], utterance: { text: 'milk and butter', channel: 'tapped' }, ...(prev ? { previousEvaluationId: prev.id, answers: prev.answers } : {}) });
+  const ask = async (prev?: { id: string; answers: { questionId: string; value: 'yes' }[] }) => await svc.evaluateRescue({ commandId: `p2-e-${Date.now()}-${Math.random()}`, runId: run.id, epoch: run.epoch, expectedRevision: run.revision, missingIngredientId: cream.id, proposedKindIds: ['whole-milk', 'unsalted-butter'], utterance: { text: 'milk and butter', channel: 'tapped' }, ...(prev ? { previousEvaluationId: prev.id, answers: prev.answers } : {}) });
   const e1 = await ask();
   if (e1.outcome !== 'needsFacts') return { pass: false, detail: `first: ${e1.outcome}` };
   const items = e1.questions.flatMap((q) => q.items.map((i) => i.text));
   const e2 = await ask({ id: e1.id, answers: e1.questions.map((q) => ({ questionId: q.id, value: 'yes' as const })) });
   if (e2.outcome !== 'proposal') return { pass: false, detail: `second: ${e2.outcome}; items ${items.join(' | ')}` };
-  const cur = svc.getActiveRecipe().run!;
-  const ap = svc.applyAmendment({ commandId: `p2-a-${Date.now()}`, runId: cur.id, epoch: cur.epoch, expectedRevision: cur.revision, evaluationId: e2.id, candidateId: e2.candidates[0].id, planId: e2.candidates[0].planId, accepted: true });
+  const cur = (await svc.getActiveRecipe()).run!;
+  const ap = await svc.applyAmendment({ commandId: `p2-a-${Date.now()}`, runId: cur.id, epoch: cur.epoch, expectedRevision: cur.revision, evaluationId: e2.id, candidateId: e2.candidates[0].id, planId: e2.candidates[0].planId, accepted: true });
   if (ap.outcome !== 'applied') return { pass: false, detail: `apply: ${ap.outcome}` };
   const s3 = ap.run.steps[2], s6 = ap.run.steps[5];
   // the itemized form; step titles are whatever the reading gave (the as-run check pinned the fixture's titles: a harness defect)
@@ -93,15 +95,15 @@ async function cook(svc: Service, recipeId: string, planId: string | undefined) 
 }
 
 async function importAndJudge(dbPath: string, extractor: Extractor, analyzer: SwapAnalyzer) {
-  const svc = new Service({ dbPath, content, interpreter: noneInterpreter, fixtureRecipes: false });
-  const auth = new Authoring({ store: svc.store, content, extractor, analyzer });
-  svc.catalog = () => auth.catalog();
+  const svc = new Service({ kv: new SqliteKv(dbPath), content, interpreter: noneInterpreter, fixtureRecipes: false });
+  const auth = new Authoring({ kv: svc.kv, ws: svc.ws, content, extractor, analyzer });
+  svc.catalog = (t) => auth.catalogIn(t);
   const out: Record<string, { draftId: string; recipeId: string | null; job: unknown }> = {};
   for (const [name, f] of Object.entries(INPUTS)) {
     const r = await auth.createImport({ kind: 'pdf', bytes: new Uint8Array(readFileSync(join(root, f))), filename: f.split('/').pop()! });
     if (r.status !== 202) { out[name] = { draftId: '', recipeId: null, job: r }; continue; }
     const job = await auth.waitForJob(r.job.id);
-    const saved = job.state === 'failed' ? null : auth.save(r.draftId, { expectedRevision: auth.revision(r.draftId), idempotencyKey: `cards2-${name}` });
+    const saved = job.state === 'failed' ? null : await auth.save(r.draftId, { expectedRevision: await auth.revision(r.draftId), idempotencyKey: `cards2-${name}` });
     out[name] = { draftId: r.draftId, recipeId: saved?.recipeId ?? null, job };
   }
   const results: Record<string, { pass: boolean; detail: string }> = {};
@@ -110,8 +112,8 @@ async function importAndJudge(dbPath: string, extractor: Extractor, analyzer: Sw
   let everyUse = true;
   for (const [name] of Object.entries(INPUTS)) {
     const d = out[name]; if (!d.draftId) { everyUse = false; continue; }
-    const c = auth.getDraft(d.draftId).draft.content;
-    const { pack } = auth.coverageOf(d.draftId);
+    const c = (await auth.getDraft(d.draftId)).draft.content;
+    const { pack } = await auth.coverageOf(d.draftId);
     for (const g of c?.ingredients ?? []) for (const u of g.uses) {
       const e = pack?.cards?.find((x) => x.useId === u.id);
       if (!u.analysis) everyUse = false;
@@ -122,16 +124,16 @@ async function importAndJudge(dbPath: string, extractor: Extractor, analyzer: Sw
     }
   }
   const x = out.explicit, job = x.job as { state?: string };
-  const r = x.draftId ? auth.effective(x.draftId) : null;
+  const r = x.draftId ? await auth.effective(x.draftId) : null;
   const cream = r?.ingredients.filter((i) => /cream/i.test(i.name)) ?? [];
   const cu = r && cream.length === 1 ? r.uses.filter((u) => u.ingredientId === cream[0].ingredientId && u.kind === 'ADD') : [];
   const amt = (u: (typeof cu)[number]) => (u.amount.kind === 'EXACT' ? `${u.amount.value.n / u.amount.value.d} ${u.amount.unit} ${u.amountProv.status}` : u.amount.kind);
   results.Y1 = { pass: job?.state === 'succeeded' && r?.ingredients.length === 5 && r?.steps.length === 7 && cu.length === 2 && cu.map((u) => `${stepOrder(r!, u.stepId)}:${amt(u)}`).join(',') === '3:300 ML SOURCE_VERIFIED,6:15 ML SOURCE_VERIFIED',
     detail: `${job?.state} · ${r ? `${r.ingredients.length}/${r.steps.length}` : 'no reading'} · cream ingredients ${cream.length} · uses ${cu.map((u) => `step ${stepOrder(r!, u.stepId)}: ${amt(u)}`).join('; ')}` };
-  const wc = x.draftId ? auth.getDraft(x.draftId).draft.content!.ingredients.filter((g) => /cream/i.test(g.name)).flatMap((g) => g.uses) : [];
+  const wc = x.draftId ? (await auth.getDraft(x.draftId)).draft.content!.ingredients.filter((g) => /cream/i.test(g.name)).flatMap((g) => g.uses) : [];
   results.Y2 = { pass: wc.length === 2 && wc.every((u) => u.reviewedFunction?.authority === 'MACHINE_CHECKED'), detail: wc.map((u) => `${u.reviewedFunction?.labels.join('+') ?? u.proposedFunction?.labels.join('+')} (${u.reviewedFunction?.authority ?? 'unresolved'})`).join('; ') };
   const p0 = wc[0]?.analysis?.plans[0];
-  const v1 = x.draftId ? auth.coverageOf(x.draftId).pack?.coverage.find((e) => e.patternId === 'cream_to_butter_milk' && e.patternVersion === 1) : undefined;
+  const v1 = x.draftId ? (await auth.coverageOf(x.draftId)).pack?.coverage.find((e) => e.patternId === 'cream_to_butter_milk' && e.patternVersion === 1) : undefined;
   results.Y3 = { pass: wc.length === 2 && wc.every((u) => u.analysis?.status === 'available' && u.analysis.plans[0]?.ruleId === 'cream_to_butter_milk@2') && v1?.status !== 'BOUND'
       && JSON.stringify(p0?.replacements.map((q) => `${q.amount.display} ${q.ingredientName}`).sort()) === JSON.stringify(['15 ML Milk', '180 ML, plus up to 30 ML more if needed Milk', '85 g Butter']),
     detail: `${wc.map((u) => `${u.analysis?.status} ${u.analysis?.plans[0]?.ruleId ?? u.analysis?.reason?.code}`).join('; ')} · v1 ${v1?.status} ${v1?.failedCheck?.code ?? ''} · ${p0?.replacements.map((q) => `${q.amount.display} ${q.ingredientName}`).join(', ') ?? ''}` };
@@ -148,7 +150,7 @@ async function rehearse() {
   const j = await importAndJudge(join(root, `.artifacts/probes/cards2-rehearsal-${Date.now()}.db`), recordedExtractor(readings, 'REHEARSAL'), recordedAnalyzer(old.cards, 'REHEARSAL_V1_CARDS'));
   writeFileSync(join(root, '.artifacts/probes/cards2-rehearsal.json'), JSON.stringify({ note: 'REHEARSAL: RECORDED explicit reading (test fixture), retained v1 cards, no calls; prompt-v2 expectations (Y5) are not meaningful here', at: new Date().toISOString(), results: j.results, table: j.table }, null, 2));
   for (const [k, x] of Object.entries(j.results)) console.log(`${k} ${x.pass ? 'PASS' : 'FAIL'} ${x.detail}`);
-  j.svc.close();
+  (j.svc.kv as SqliteKv).close();
 }
 
 async function run() {
@@ -173,14 +175,14 @@ async function run() {
   let j: Awaited<ReturnType<typeof importAndJudge>> | null = null, error: string | null = null;
   try { j = await importAndJudge(db, mixed(old.readings, novaExtractor(nova)), novaAnalyzer(nova)); } catch (e) { error = (e as Error).message; }
   // keep everything: raw readings, raw cards, validation, the judged table, the spend
-  const svc = j?.svc ?? new Service({ dbPath: db, content, interpreter: noneInterpreter, fixtureRecipes: false });
+  const svc = j?.svc ?? new Service({ kv: new SqliteKv(db), content, interpreter: noneInterpreter, fixtureRecipes: false });
   const raw: Record<string, unknown> = {};
   const replay = { readings: {} as Record<string, unknown>, cards: {} as Record<string, unknown> };
   for (const name of Object.keys(INPUTS)) {
     const d = j?.out[name];
     if (!d?.draftId) { raw[name] = { job: d?.job ?? null }; continue; }
-    const ex = svc.store.all<{ extractor: string; status: string; raw_json: string | null; issues_json: string; input_tokens: number | null; output_tokens: number | null; cost_usd: number }>('SELECT extractor, status, raw_json, issues_json, input_tokens, output_tokens, cost_usd FROM extractions WHERE draft_id = ?', d.draftId);
-    const sa = svc.store.all<{ analyzer: string; status: string; raw_json: string | null; issues_json: string | null; input_tokens: number | null; output_tokens: number | null; cost_usd: number; input_hash: string }>('SELECT analyzer, status, raw_json, issues_json, input_tokens, output_tokens, cost_usd, input_hash FROM swap_analyses WHERE draft_id = ?', d.draftId);
+    const ex = (await modelRows(svc.kv, svc.ws, d.draftId)).extractions;
+    const sa = (await modelRows(svc.kv, svc.ws, d.draftId)).analyses;
     raw[name] = { job: d.job, extraction: ex.map((x) => ({ ...x, raw: x.raw_json ? JSON.parse(x.raw_json) : null, raw_json: undefined, issues: JSON.parse(x.issues_json), issues_json: undefined })),
       swapAnalysis: sa.map((x) => ({ ...x, raw: x.raw_json ? JSON.parse(x.raw_json) : null, raw_json: undefined, issues: x.issues_json ? JSON.parse(x.issues_json) : null, issues_json: undefined })) };
     if (name === 'explicit') {   // the demo replays only the new recipe; the others keep their existing analyses
@@ -197,7 +199,7 @@ async function run() {
   if (error) console.log(`ERROR ${error}`);
   for (const [k, x] of Object.entries(results.expectations)) console.log(`${k} ${x.pass ? 'PASS' : 'FAIL'} ${x.detail}`);
   console.log(`authorization ${auth.id}: $${after.authorizationUsd.toFixed(6)} · calls ${JSON.stringify(after.calls)}`);
-  svc.close();
+  (svc.kv as SqliteKv).close();
 }
 
 /** The kept live output through the current code (no calls). The as-run record stays results-v1.json. */
@@ -209,7 +211,7 @@ async function revalidate() {
   const j = await importAndJudge(join(root, `.artifacts/probes/cards2-revalidation-${Date.now()}.db`), recordedExtractor(readings, 'REPLAY_OF_CARDS2_PROBE'), recordedAnalyzer(cards, 'REPLAY_OF_CARDS2_PROBE'));
   writeFileSync(join(dir, 'revalidated-v1.json'), JSON.stringify({ note: 'RE-VALIDATION of the kept live output (results-v1.json) by the code as of this file: no new calls; not the as-run result', at: new Date().toISOString(), results: j.results, coverage: j.table }, null, 2));
   for (const [k, x] of Object.entries(j.results)) console.log(`${k} ${x.pass ? 'PASS' : 'FAIL'} ${x.detail}`);
-  j.svc.close();
+  (j.svc.kv as SqliteKv).close();
 }
 
 const mode = process.argv[2];

@@ -1,0 +1,209 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "RECOVERY",
+  "patternId": "acidified_milk_for_sour_milk",
+  "version": 1,
+  "title": "Milk soured with lemon juice for sour milk or buttermilk",
+  "target": {
+    "ingredientClass": "acidic-dairy",
+    "performsAll": [
+      "LIQUID",
+      "ACIDITY"
+    ],
+    "stepTechnique": "MIX_DOUGH"
+  },
+  "slots": [],
+  "applicability": [],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "SOURCED",
+    "approval": "COMMISSIONED_PENDING_OWNER_CONFIRMATION",
+    "basis": "Knowledge packet 2026-10-13 item E2, PROPOSED (not approved). Research acidified_milk_for_buttermilk (SOURCE_SUPPORTED): King Arthur SRC-CM-26#a (1 tbsp acid stirred into 1 cup milk, stand 10-15 min; biscuits rose and browned like buttermilk ones, flavour flatter SRC-CM-26#b/#c); USU, NDSU, OSU, Illinois, NCSU, Land O'Lakes (1 tbsp acid with milk to make 1 cup, stand 5 min). Selected: King Arthur's proportion (the same volume of milk plus 1 tbsp lemon juice per cup), so the milk keeps the recipe's own cup measure. Conflicts kept: total volume (KA 1 cup + 1 tbsp vs others 1 cup) and stand time (5-15 min). Sour milk here: the research covers soured milk made this way; old recipes' naturally soured milk is the same job (acid for the soda). Not for dishes where buttermilk is the main flavour (KA), which this can't detect: stated in the tradeoff. Input bounds 1/2-4 cups are engineering bounds."
+  },
+  "introduces": [
+    {
+      "local": "milk",
+      "kindId": "whole-milk",
+      "name": "Milk"
+    },
+    {
+      "local": "lemon",
+      "kindId": "lemon-juice",
+      "name": "Lemon juice"
+    }
+  ],
+  "quantities": {
+    "milk": {
+      "kind": "SCALE",
+      "from": {
+        "listedTotalOf": "$target"
+      },
+      "sourceUnit": "ML",
+      "factor": {
+        "n": 1,
+        "d": 1
+      },
+      "resultUnit": "ML",
+      "inputDomain": [
+        {
+          "n": 120,
+          "d": 1
+        },
+        {
+          "n": 960,
+          "d": 1
+        }
+      ],
+      "increment": {
+        "n": 1,
+        "d": 100
+      },
+      "maxAbsError": {
+        "n": 1,
+        "d": 200
+      },
+      "outputDomain": [
+        {
+          "n": 120,
+          "d": 1
+        },
+        {
+          "n": 960,
+          "d": 1
+        }
+      ],
+      "display": "CUPS"
+    },
+    "lemon": {
+      "kind": "SCALE",
+      "from": {
+        "listedTotalOf": "$target"
+      },
+      "sourceUnit": "ML",
+      "factor": {
+        "n": 1,
+        "d": 16
+      },
+      "resultUnit": "ML",
+      "inputDomain": [
+        {
+          "n": 120,
+          "d": 1
+        },
+        {
+          "n": 960,
+          "d": 1
+        }
+      ],
+      "increment": {
+        "n": 1,
+        "d": 100
+      },
+      "maxAbsError": {
+        "n": 1,
+        "d": 200
+      },
+      "outputDomain": [
+        {
+          "n": 15,
+          "d": 2
+        },
+        {
+          "n": 60,
+          "d": 1
+        }
+      ],
+      "display": "SPOONS"
+    }
+  },
+  "ops": [
+    {
+      "op": "REPLACE_USE",
+      "use": "$target",
+      "with": {
+        "local": "milk_use",
+        "ingredient": {
+          "introduce": "milk"
+        },
+        "at": "$target.step",
+        "qty": "milk",
+        "prepNote": null,
+        "functions": [
+          "LIQUID"
+        ],
+        "allowance": null
+      }
+    },
+    {
+      "op": "ADD_USE",
+      "use": {
+        "local": "lemon_use",
+        "ingredient": {
+          "introduce": "lemon"
+        },
+        "at": "$target.step",
+        "qty": "lemon",
+        "prepNote": null,
+        "functions": [
+          "ACIDITY"
+        ],
+        "allowance": null
+      },
+      "placement": {
+        "beside": "milk_use",
+        "joiner": "soured with"
+      }
+    },
+    {
+      "op": "APPEND_STEP_NOTE",
+      "step": "$target.step",
+      "text": "Stir the lemon juice into the milk first and let it stand for about five minutes, until it thickens slightly, before you add it."
+    },
+    {
+      "op": "SET_RESUME",
+      "step": "$target.step"
+    }
+  ],
+  "siblingHandlers": [],
+  "functionAccounting": [
+    {
+      "from": "$target",
+      "functionId": "LIQUID",
+      "disposition": "RETAINED",
+      "to": "milk_use"
+    },
+    {
+      "from": "$target",
+      "functionId": "ACIDITY",
+      "disposition": "MOVED",
+      "to": "lemon_use"
+    }
+  ],
+  "introducedFunctions": [
+    {
+      "local": "lemon_use",
+      "functionId": "ACIDITY"
+    }
+  ],
+  "consequence": {
+    "outcomeClass": "SUBSTITUTED",
+    "equivalence": "NOT_EQUIVALENT",
+    "headline": "Use milk soured with lemon juice instead.",
+    "reason": "The baking soda needs an acid, and soured milk supplies it: a tablespoon of lemon juice in each cup of milk (King Arthur; extension guides use the same mix).",
+    "tradeoff": "It rises and browns much the same but tastes a little flatter. Where the buttermilk's own flavour is the point, it isn't a match. Not kitchen-tested in this recipe."
+  },
+  "proposal": {
+    "classes": [
+      "citrus-juice",
+      "milk"
+    ],
+    "relation": "ADAPTED",
+    "text": "Yes, if you sour the milk first with lemon juice."
+  },
+  "guards": [
+    {
+      "kind": "CURRENT_STEP_IS",
+      "step": "$target.step"
+    }
+  ]
+}

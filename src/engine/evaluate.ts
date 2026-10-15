@@ -1,11 +1,12 @@
 // Deterministic runtime evaluator (ESOD §6). Pure: no I/O, no clock, no model, no recipe-specific branches.
 import {
   ENGINE_SEMANTICS, MAX_CHANGES_PER_RUN,
-  type Binding, type Candidate, type DecisionTrace, type EvaluationResult, type Id, type IngredientUse, type LedgerRow,
+  type Binding, type Candidate, type ChangeOrigin, type DecisionTrace, type EvaluationResult, type Id, type IngredientUse, type LedgerRow,
   type ProposalResponse, type ProtectedFact, type Question, type Recipe, type RecipePack, type Refusal, type RefusalCode,
-  type Requirement, type RescueRequest, type RoleRow, type RunSnapshot, type StepChange, type Target, type TraceCheck,
+  type RebindKnowledge, type Requirement, type RescueRequest, type RoleRow, type RunSnapshot, type StepChange, type Target, type TraceCheck,
   type Vocabulary,
 } from '../contract/types.ts';
+import { rebind } from '../compile/binder.ts';
 import { add, canonicalJson, formatRational, hash, type Rational } from '../domain/rational.ts';
 import {
   amountDisplay, currentStepId, getIngredient, getStep, getUse, lowerFirst, qtyText, renderStep, stepOrder, upperFirst,
@@ -167,7 +168,7 @@ function buildCandidate(b: Binding, snap: RunSnapshot, after: Recipe, resumeStep
   const planHash = hash({
     packHash, engineSemantics: ENGINE_SEMANTICS, bindingId: b.bindingId, runId: snap.runId, epoch: snap.epoch,
     baseRevision: snap.revision, version: snap.version, ops: b.ops, resultRecipeHash: hash(after), functionMap: b.functionMap,
-    resume: resumeStepId, requirementHash: hash(reqs),
+    resume: resumeStepId, requirementHash: hash(reqs), knowledgeReleaseId: snap.knowledgeReleaseId ?? null,
   });
   return {
     candidateId: b.bindingId, planHash, patternTitle: b.patternTitle, consequence: b.consequence!, changes, ledger, roleMap, noLongerUsed,
@@ -181,6 +182,8 @@ export interface BindingOutcome {
   candidate: Candidate | null; questions: Question[];
   refusalCode: RefusalCode | null; protectedFacts: ProtectedFact[]; subjectUseId: Id | null;
   checks: TraceCheck[];
+  /** REINTRODUCES_UNAVAILABLE: the ingredient the plan would bring back */
+  subjectName?: string;
 }
 
 export function evaluateBinding(b: Binding, snap: RunSnapshot, v: Vocabulary, answers: Answers, packHash: string): BindingOutcome {
@@ -224,6 +227,12 @@ export function evaluateBinding(b: Binding, snap: RunSnapshot, v: Vocabulary, an
   let after: Recipe, resumeStepId: Id | null;
   try { ({ recipe: after, resumeStepId } = applyOps(r, b.ops)); }
   catch (e) { return refuse('APPLY', 'ops apply', 'NOT_APPLICABLE_NOW', (e as Error).message); }
+  stampOrigins(r, after, b, snap);
+  // a cycle: a plan may not bring back an ingredient the cook is out of (this one, or one an accepted change replaced)
+  const out = new Set([...(snap.unavailableKinds ?? []), getIngredient(r, target.ingredientId)?.kind?.kindId].filter((k): k is Id => !!k));
+  const back = after.uses.filter((u) => !getUse(r, u.useId)).map((u) => getIngredient(after, u.ingredientId)!).find((i) => i.kind && out.has(i.kind.kindId));
+  if (back) return { ...refuse('APPLY', 'brings back nothing the cook is out of', 'REINTRODUCES_UNAVAILABLE', `${back.ingredientId} (${back.kind!.kindId})`, [], null), subjectName: back.name };
+  ok('APPLY', 'brings back nothing the cook is out of');
   if (!resumeStepId || (snap.stepStatus[resumeStepId] ?? 'NOT_STARTED') !== 'NOT_STARTED' || currentStepId(after, snap.stepStatus) !== resumeStepId) {
     return refuse('APPLY', 'resume is the first unfinished, not-started step', 'NOT_APPLICABLE_NOW', `resume ${resumeStepId}`);
   }
@@ -253,12 +262,20 @@ export function evaluateBinding(b: Binding, snap: RunSnapshot, v: Vocabulary, an
   return { status: 'ELIGIBLE', candidate, questions: [], refusalCode: null, protectedFacts: [], subjectUseId: null, checks };
 }
 
+/** Every use and ingredient this plan adds records the change it came from (deterministic: the plan hash covers it). */
+function stampOrigins(before: Recipe, after: Recipe, b: Binding, snap: RunSnapshot) {
+  const replaces = new Map(b.ops.flatMap((o) => (o.op === 'REPLACE_USE' ? [[o.newUse.useId, o.useId] as const] : [])));
+  const origin = (replacesUseId: Id | null): ChangeOrigin => ({ fromVersion: snap.version, patternId: b.patternId, patternVersion: b.patternVersion, knowledgeReleaseId: snap.knowledgeReleaseId ?? null, replacesUseId });
+  for (const u of after.uses) if (!getUse(before, u.useId)) u.origin = origin(replaces.get(u.useId) ?? null);
+  for (const i of after.ingredients) if (!getIngredient(before, i.ingredientId)) i.origin = origin(null);
+}
+
 // ---------- refusal copy (deterministic, closed table) ----------
-const PRIORITY: RefusalCode[] = ['PROTECTED_WORK', 'AFFECTED_USE_IN_PROGRESS', 'CONFLICTS_WITH_EARLIER_CHANGE', 'AFFECTED_USE_UNACCOUNTED', 'INSUFFICIENT_AVAILABILITY', 'NOT_APPLICABLE_NOW'];
+const PRIORITY: RefusalCode[] = ['PROTECTED_WORK', 'AFFECTED_USE_IN_PROGRESS', 'CONFLICTS_WITH_EARLIER_CHANGE', 'REINTRODUCES_UNAVAILABLE', 'AFFECTED_USE_UNACCOUNTED', 'INSUFFICIENT_AVAILABILITY', 'NOT_APPLICABLE_NOW'];
 
 function makeRefusal(code: RefusalCode, snap: RunSnapshot, v: Vocabulary, ctx: {
   ingredientId?: Id; target?: IngredientUse; refusalBinding?: Binding; protectedFacts?: ProtectedFact[]; subjectUseId?: Id | null; reason?: Refusal['reason'];
-  origin?: Refusal['origin'];
+  origin?: Refusal['origin']; subjectName?: string;
 }): Refusal {
   const r = snap.recipe;
   const ing = ctx.ingredientId ? getIngredient(r, ctx.ingredientId) : undefined;
@@ -271,6 +288,8 @@ function makeRefusal(code: RefusalCode, snap: RunSnapshot, v: Vocabulary, ctx: {
   const firstPf = ctx.protectedFacts?.[0];
   const origin = ctx.origin ?? (ctx.refusalBinding ? (ctx.refusalBinding.card ? 'IMPORT_CARD' : 'REVIEWED') : null);
   const plan = origin === 'IMPORT_CARD' ? 'prepared' : 'reviewed';   // honest labelling: an import card is not a reviewed rule
+  const introduced = ing?.origin ? ' as it is used now (it came in with a change you accepted earlier)' : '';
+
   const messages: Record<RefusalCode, string> = {
     NOT_FUNCTIONALLY_EQUIVALENT: ctx.refusalBinding?.refusal?.text ?? '',
     PROTECTED_WORK: firstPf ? (firstPf.kind.startsWith('STEP')
@@ -278,14 +297,16 @@ function makeRefusal(code: RefusalCode, snap: RunSnapshot, v: Vocabulary, ctx: {
       : `Some ${name} is already in for step ${firstPf.order}, so this change can't be used.`) : `Work this change would rewrite is already reported, so it can't be used.`,
     AFFECTED_USE_IN_PROGRESS: `Some ${name} for step ${subj ? stepOrder(r, subj.stepId) : '?'} is already in, so this change can't be used.`,
     AFFECTED_USE_UNACCOUNTED: `The ${plan} change doesn't cover the ${name} in step ${subj ? stepOrder(r, subj.stepId) : '?'}, so it can't be used.`,
-    NO_SUPPORTED_RECOVERY: `There's no reviewed change for ${name} in this recipe. That isn't a judgement that nothing else could work.`,
+    NO_SUPPORTED_RECOVERY: `There's no reviewed change for ${name}${introduced || ' in this recipe'}. That isn't a judgement that nothing else could work.`,
     NOT_APPLICABLE_NOW: `The ${plan} change for ${name} doesn't apply at this point in the recipe.`,
     INSUFFICIENT_AVAILABILITY: `Without those, there's no ${plan} change for ${name} here.`,
     REFERENCE_NOT_IN_RECIPE: `That ingredient isn't in this recipe.`,
     NOTHING_TO_CHANGE: ctx.reason === 'REPLACED_BY_AMENDMENT' ? `${upperFirst(name)} is no longer in your recipe after the change you accepted.` : `All the ${name} in this recipe is already in.`,
     SUCCESSIVE_RESCUE_UNSUPPORTED: `This cooking session already used its ${MAX_CHANGES_PER_RUN} changes.`,
-    CONFLICTS_WITH_EARLIER_CHANGE: `That change would rewrite a step an earlier change in this session already altered, so no change can be offered here.`,
+    CONFLICTS_WITH_EARLIER_CHANGE: `That change would undo part of a change you accepted earlier in this session, so it can't be offered here.`,
     NOT_RELEASED: `This recipe isn't released for cooking guidance.`,
+    REINTRODUCES_UNAVAILABLE: `That change would need ${ctx.subjectName ? lowerFirst(ctx.subjectName) : 'an ingredient'}, which you said you're out of, so it can't be used.`,
+    KNOWLEDGE_UNAVAILABLE: `The reviewed knowledge this recipe was prepared with isn't available, so no further change for ${name} can be checked.`,
   };
   return {
     code, message: messages[code], reason: ctx.reason ?? null, origin,
@@ -302,7 +323,8 @@ function makeRefusal(code: RefusalCode, snap: RunSnapshot, v: Vocabulary, ctx: {
 }
 
 // ---------- entry ----------
-export function evaluate(pack: RecipePack, v: Vocabulary, snap: RunSnapshot, req: RescueRequest, released = false): EvaluationResult {
+/** `knowledge`: the run's pinned release, for plans that must be re-bound against the current recipe (null: unavailable). */
+export function evaluate(pack: RecipePack, v: Vocabulary, snap: RunSnapshot, req: RescueRequest, released = false, knowledge: RebindKnowledge | null = null): EvaluationResult {
   const r = snap.recipe;
   const stateHash = hash({ recipe: hash(r), stepStatus: snap.stepStatus, useStatus: snap.useStatus, version: snap.version });
   const trace: DecisionTrace = { kind: 'cc-decision-trace/2', engineSemantics: ENGINE_SEMANTICS, packHash: pack.packHash, stateHash, global: [], bindings: [] };
@@ -314,8 +336,9 @@ export function evaluate(pack: RecipePack, v: Vocabulary, snap: RunSnapshot, req
     res.speech = speechFor(res);
     return res;
   };
+  let rebound: EvaluationResult['rebound'];
   const refused = (refusal: Refusal, target: Target | null = null, proposal: ProposalResponse | null = null) =>
-    done({ status: 'REFUSED', target, proposal, candidates: [], previews: [], questions: [], refusal });
+    done({ status: 'REFUSED', target, proposal, candidates: [], previews: [], questions: [], refusal, ...(rebound ? { rebound } : {}) });
 
   if (snap.mode === 'COOK' && !released) {
     g('MODE', 'content released for COOK', 'FAIL', 'NOT_RELEASED');
@@ -362,7 +385,26 @@ export function evaluate(pack: RecipePack, v: Vocabulary, snap: RunSnapshot, req
   }
   g('RESCUE_LIMIT', `at most ${MAX_CHANGES_PER_RUN} changes per run`, 'PASS');
 
-  const B = pack.bindings.filter((b) => b.targetUseId === tUse.useId);   // COOK would further filter to released bindings
+  // Successive changes (ENGINE_SEMANTICS 4): a frozen reviewed plan describes the recipe as saved. When the target came in with
+  // an accepted change, or an accepted change altered what a frozen reviewed plan read or would rewrite, the pinned release's
+  // reviewed patterns are bound again against the current recipe. Import cards (AI) are never re-bound: one applies only to the
+  // recipe state it was checked against (an original use whose facts no change altered), and no model is called here.
+  const frozen = pack.bindings.filter((b) => b.targetUseId === tUse.useId);   // COOK would further filter to released bindings
+  const introducedTarget = !getUse(pack.recipe, tUse.useId);
+  const stale = frozen.filter((b) => !b.card && (factsHashOf(r, tUse, { slots: b.slots }) !== b.factsHash || earlierChangeConflict(pack.recipe, r, b) !== null));
+  let B = frozen;
+  if (introducedTarget || stale.length) {
+    if (!knowledge) {
+      g('SELECT', 're-bind against the current recipe', 'FAIL', 'KNOWLEDGE_UNAVAILABLE', introducedTarget ? 'target introduced by an accepted change' : stale.map((b) => b.bindingId).join(', '));
+      return refused(makeRefusal('KNOWLEDGE_UNAVAILABLE', snap, v, { ingredientId: ing.ingredientId, target: tUse }), target);
+    }
+    const rb = rebind(r, knowledge.vocab, knowledge.patterns, tUse.useId, { baseline: pack.recipe, seed: `v${snap.version}` });
+    if (rb.errors.length) throw new Error(`current recipe invalid: ${rb.errors.join('; ')}`);
+    rebound = { releaseId: knowledge.releaseId, coverage: rb.coverage.filter((c) => c.targetUseId === tUse.useId), bindings: rb.bindings };
+    B = [...frozen.filter((b) => b.card), ...rb.bindings];
+    g('SELECT', `re-bound ${tUse.useId} against version ${snap.version} (release ${knowledge.releaseId})`, 'PASS', null,
+      rebound.coverage.map((c) => `${c.patternId}@${c.patternVersion}:${c.status}${c.failedCheck ? `:${c.failedCheck.code}` : ''}`).join(', ') || null);
+  }
   g('SELECT', `bindings for ${tUse.useId}`, B.length ? 'PASS' : 'FAIL', B.length ? null : 'NO_SUPPORTED_RECOVERY', B.map((b) => b.bindingId).join(', ') || null);
 
   // PROPOSAL (§6.3)
@@ -375,7 +417,7 @@ export function evaluate(pack: RecipePack, v: Vocabulary, snap: RunSnapshot, req
 
   const outcomes = B.filter((b) => b.kind === 'RECOVERY').map((b) => {
     const answers = new Map(req.answers.map((a) => [a.questionId, a.choiceId] as const));
-    const conflict = earlierChangeConflict(pack.recipe, snap.recipe, b);
+    const conflict = rebound?.bindings.includes(b) ? null : earlierChangeConflict(pack.recipe, snap.recipe, b);   // a re-bound plan was composed with the current recipe
     const o: BindingOutcome = conflict
       ? { status: 'REFUSED', candidate: null, questions: [], refusalCode: 'CONFLICTS_WITH_EARLIER_CHANGE', protectedFacts: [], subjectUseId: null,
           checks: [{ stage: 'HISTORY', check: 'touches nothing an earlier change altered', result: 'FAIL', code: 'CONFLICTS_WITH_EARLIER_CHANGE', detail: conflict }] }
@@ -403,14 +445,17 @@ export function evaluate(pack: RecipePack, v: Vocabulary, snap: RunSnapshot, req
     if (refuser) return refused(makeRefusal('NOT_FUNCTIONALLY_EQUIVALENT', snap, v, { ingredientId: ing.ingredientId, target: tUse, refusalBinding: refuser }), target, proposal);
     const failed = outcomes.filter((x) => x.o.refusalCode);
     const best = PRIORITY.map((c) => failed.find((x) => x.o.refusalCode === c)).find(Boolean);
+    // a reviewed plan that would undo part of an earlier change (rewrite its step, drop its allowance) is a conflict, not "no rule"
+    const clash = rebound?.coverage.find((c) => c.failedCheck && ['REWRITES_EARLIER_CHANGE', 'DROPS_EARLIER_ALLOWANCE'].includes(c.failedCheck.code));
+    if (!best && clash) return refused(makeRefusal('CONFLICTS_WITH_EARLIER_CHANGE', snap, v, { ingredientId: ing.ingredientId, target: tUse, origin: 'REVIEWED' }), target, proposal);
     if (!best) return refused(makeRefusal('NO_SUPPORTED_RECOVERY', snap, v, { ingredientId: ing.ingredientId, target: tUse }), target, proposal);
-    return refused(makeRefusal(best.o.refusalCode!, snap, v, { ingredientId: ing.ingredientId, target: tUse, protectedFacts: best.o.protectedFacts, subjectUseId: best.o.subjectUseId, origin: best.b.card ? 'IMPORT_CARD' : 'REVIEWED' }), target, proposal);
+    return refused(makeRefusal(best.o.refusalCode!, snap, v, { ingredientId: ing.ingredientId, target: tUse, protectedFacts: best.o.protectedFacts, subjectUseId: best.o.subjectUseId, subjectName: best.o.subjectName, origin: best.b.card ? 'IMPORT_CARD' : 'REVIEWED' }), target, proposal);
   }
   if (pending.length) {
     return done({ status: 'CLARIFY', target, proposal, candidates: [], refusal: null,
-      previews: live.map((x) => x.o.candidate!), questions: pending.flatMap((x) => x.o.questions) });
+      previews: live.map((x) => x.o.candidate!), questions: pending.flatMap((x) => x.o.questions), ...(rebound ? { rebound } : {}) });
   }
-  return done({ status: 'CANDIDATES', target, proposal, candidates: eligible.map((x) => x.o.candidate!), previews: [], questions: [], refusal: null });
+  return done({ status: 'CANDIDATES', target, proposal, candidates: eligible.map((x) => x.o.candidate!), previews: [], questions: [], refusal: null, ...(rebound ? { rebound } : {}) });
 }
 
 /** A later change may not rewrite a step or use that an earlier change in this run altered (bindings are compiled
@@ -459,4 +504,16 @@ function speechFor(res: Omit<EvaluationResult, 'speech'>): string {
   }
   const rf = res.refusal!;
   return `${rf.message} ${rf.unchanged}`.trim();
+}
+
+/** The answer when the run's knowledge release can't be read or established: nothing is evaluated (frozen plans need the
+ *  vocabulary they were compiled with), and the recipe is unchanged. Never falls back to other knowledge. */
+export function knowledgeUnavailable(pack: RecipePack, snap: RunSnapshot, req: RescueRequest, why: string): EvaluationResult {
+  const none: Vocabulary = { schema: 'cc-vocabulary/1', version: 0, functions: [], techniques: [], classes: [], kinds: [] };
+  const stateHash = hash({ recipe: hash(snap.recipe), stepStatus: snap.stepStatus, useStatus: snap.useStatus, version: snap.version });
+  const ing = req.missingIngredientId ? getIngredient(snap.recipe, req.missingIngredientId) : undefined;
+  const refusal = makeRefusal('KNOWLEDGE_UNAVAILABLE', snap, none, { ingredientId: ing?.ingredientId });
+  const trace: DecisionTrace = { kind: 'cc-decision-trace/2', engineSemantics: ENGINE_SEMANTICS, packHash: pack.packHash, stateHash,
+    global: [{ stage: 'SELECT', check: 'knowledge release readable', result: 'FAIL', code: 'KNOWLEDGE_UNAVAILABLE', detail: why }], bindings: [] };
+  return { status: 'REFUSED', target: null, proposal: null, candidates: [], previews: [], questions: [], refusal, notices: [...req.notices], trace, speech: `${refusal.message} ${refusal.unchanged}` };
 }

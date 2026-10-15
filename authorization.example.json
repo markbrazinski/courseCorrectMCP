@@ -1,0 +1,10 @@
+{
+  "id": "local-1",
+  "grantedBy": "<your-name>",
+  "at": "2026-10-14",
+  "profile": "<your-aws-cli-profile>",
+  "maxCalls": { "extraction": 5, "swapAnalysis": 10, "interpretation": 50, "explanation": 0, "speech": 100, "ocr": 0 },
+  "maxUsd": 1,
+  "projectCeilingUsd": 5,
+  "priorProjectUsd": 0
+}

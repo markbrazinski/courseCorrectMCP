@@ -12,6 +12,7 @@ import { Authoring } from './authoring/drafts.ts';
 import { recordedExtractor } from './authoring/extract.ts';
 import { recordedAnalyzer } from './authoring/swap-analysis.ts';
 import { Service } from './service/commands.ts';
+import { SqliteKv } from './service/kv-sqlite.ts';
 import { loadContent } from './service/content.ts';
 import { startHttp } from './service/http.ts';
 import { noneInterpreter } from './service/interpret.ts';
@@ -21,10 +22,10 @@ const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const outDir = join(import.meta.dirname, '../.artifacts/walkthrough');
 mkdirSync(outDir, { recursive: true });
 const content = loadContent();
-const svc = new Service({ dbPath: join(outDir, `m1-${stamp}.db`), content, interpreter: noneInterpreter, fixtureRecipes: false });
+const svc = new Service({ kv: new SqliteKv(join(outDir, `m1-${stamp}.kv`)), content, interpreter: noneInterpreter, fixtureRecipes: false });
 const rec = await recordedDemo(content.vocab);
-const authoring = new Authoring({ store: svc.store, content, extractor: recordedExtractor(rec.readings, 'RECORDED_FIXTURES'), analyzer: recordedAnalyzer(rec.cards, 'RECORDED_FIXTURES') });
-svc.catalog = () => authoring.catalog();
+const authoring = new Authoring({ kv: svc.kv, ws: svc.ws, content, extractor: recordedExtractor(rec.readings, 'RECORDED_FIXTURES'), analyzer: recordedAnalyzer(rec.cards, 'RECORDED_FIXTURES') });
+svc.catalog = (t) => authoring.catalogIn(t);
 const port = 18000 + Math.floor(Math.random() * 1000);
 const server = await startHttp(svc, { port, ownerToken: randomUUID(), authoring });
 const client = new Client({ name: 'm1-walkthrough', version: '0.1.0' });
@@ -66,7 +67,7 @@ try {
     const r = await authoring.createImport({ kind: 'pdf', bytes: demoPdf(d.lines), filename: `${d.name}.pdf` });
     if (r.status !== 202) throw new Error('import');
     await authoring.waitForJob(r.job.id);
-    const saved = authoring.save(r.draftId, { expectedRevision: authoring.revision(r.draftId) });
+    const saved = await authoring.save(r.draftId, { expectedRevision: await authoring.revision(r.draftId) });
     ids[d.name] = saved.recipeId;
     console.log(`    ${d.name}: ${saved.release.kind === 'eligible' ? saved.release.coverageSummary : 'ineligible'}`);
   }
@@ -150,6 +151,6 @@ try {
   server.close();
   writeFileSync(join(outDir, `m1-${stamp}.json`), JSON.stringify({ kind: 'cc-m1-walkthrough/2', at: stamp, recipes: 'imported demo PDFs (RECORDED readings + RECORDED card fixtures)', interpreter: 'structured (tapped)', mode: 'ENGINEERING', failures, calls: log }, null, 2));
   console.log(`\n${failures.length ? `FAILED (${failures.length}):\n  ${failures.join('\n  ')}` : 'ALL CHECKS PASSED'} · artifact .artifacts/walkthrough/m1-${stamp}.json`);
-  svc.close();
+  (svc.kv as SqliteKv).close();
   process.exitCode = failures.length ? 1 : 0;
 }

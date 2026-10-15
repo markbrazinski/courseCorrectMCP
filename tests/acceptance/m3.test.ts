@@ -30,18 +30,18 @@ describe('speech text is only what the service rendered', () => {
     const run = await startAt(svc, RECIPE['risotto.demo'], 'risotto.step5');
     const ev = await svc.evaluateRescue({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, utterance: { text: "I don't have any white wine. Can I use lemon juice?", channel: 'typed' } });
     if (ev.outcome === 'rejected') throw new Error(ev.code);
-    expect(svc.speechText({ evaluationId: ev.id })).toBe(ev.speech.text);
-    expect(svc.speechText({ runId: run.id, stepId: run.steps[4].stepId })).toBe('Step 5. Pour in 120 ML dry white wine and stir until absorbed.');
-    expect(svc.speechText({ runId: run.id, stepId: 'nope' })).toBeNull();
-    expect(svc.speechText({ evaluationId: 'nope' })).toBeNull();
-    expect(svc.speechText({ text: 'say anything' } as never)).toBeNull();
+    expect(await svc.speechText({ evaluationId: ev.id })).toBe(ev.speech.text);
+    expect(await svc.speechText({ runId: run.id, stepId: run.steps[4].stepId })).toBe('Step 5. Pour in 120 ML dry white wine and stir until absorbed.');
+    expect(await svc.speechText({ runId: run.id, stepId: 'nope' })).toBeNull();
+    expect(await svc.speechText({ evaluationId: 'nope' })).toBeNull();
+    expect(await svc.speechText({ text: 'say anything' } as never)).toBeNull();
     // "Change applied." only for an amendment this run holds: never before the server confirms
-    expect(svc.speechText({ runId: run.id, stepId: run.steps[4].stepId, amendmentId: 'am_not_applied' })).toBeNull();
+    expect(await svc.speechText({ runId: run.id, stepId: run.steps[4].stepId, amendmentId: 'am_not_applied' })).toBeNull();
     const yes = await svc.evaluateRescue({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, previousEvaluationId: ev.id, answers: ev.outcome === 'needsFacts' ? ev.questions.map((q) => ({ questionId: q.id, value: 'yes' as const })) : [] });
     if (yes.outcome !== 'proposal') throw new Error(yes.outcome);
-    const ap = svc.applyAmendment({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, evaluationId: yes.id, candidateId: yes.candidates[0].id, planId: yes.candidates[0].planId, accepted: true });
+    const ap = await svc.applyAmendment({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, evaluationId: yes.id, candidateId: yes.candidates[0].id, planId: yes.candidates[0].planId, accepted: true });
     if (ap.outcome !== 'applied') throw new Error(ap.outcome);
-    expect(svc.speechText({ runId: run.id, stepId: ap.resume.stepId, amendmentId: ap.amendment.id })).toBe(`Change applied. Step 5. ${ap.resume.text}`);
+    expect(await svc.speechText({ runId: run.id, stepId: ap.resume.stepId, amendmentId: ap.amendment.id })).toBe(`Change applied. Step 5. ${ap.resume.text}`);
   });
 });
 

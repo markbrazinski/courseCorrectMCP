@@ -53,7 +53,7 @@ describe('FE–BE v1 wire fixtures (B32)', () => {
     expect(c).toMatchObject({ resumeStepId: STEP['r.deglaze'], applicable: { kind: 'yes' } });
 
     // §7.5
-    const applied = svc.applyAmendment({ commandId: cmd(), ...base, evaluationId: e2.id, candidateId: c.id, planId: c.planId, accepted: true });
+    const applied = await svc.applyAmendment({ commandId: cmd(), ...base, evaluationId: e2.id, candidateId: c.id, planId: c.planId, accepted: true });
     expect(applied.outcome).toBe('applied');
     if (applied.outcome !== 'applied') return;
     expect(applied.amendment).toMatchObject({ changedStepIds: [STEP['r.deglaze'], STEP['r.finish']], appliedAtRunRevision: run.revision + 1 });
@@ -85,7 +85,7 @@ describe('FE–BE v1 wire fixtures (B32)', () => {
 
     const { svc: s2 } = newService();
     const r2 = await startAt(s2, RECIPE['risotto.demo'], 'risotto.step5');
-    const st = s2.recordProgress({ commandId: cmd(), runId: r2.id, epoch: r2.epoch, expectedRevision: r2.revision, stepId: STEP['r.deglaze'], progress: 'started' });
+    const st = await s2.recordProgress({ commandId: cmd(), runId: r2.id, epoch: r2.epoch, expectedRevision: r2.revision, stepId: STEP['r.deglaze'], progress: 'started' });
     if (st.outcome !== 'recorded') throw new Error('progress');
     const pw = await s2.evaluateRescue({ commandId: cmd(), runId: r2.id, epoch: r2.epoch, expectedRevision: st.run.revision, missingIngredientId: ING['wine'] });
     expect(pw).toMatchObject({ outcome: 'refused', refusal: { kind: 'protectedWork', stepId: STEP['r.deglaze'], progress: 'started', guidance: null } });
@@ -108,7 +108,7 @@ describe('FE–BE v1 wire fixtures (B32)', () => {
     expect(e2.candidates[0].stepChanges.map((s) => [s.stepId, s.relation])).toEqual([
       [STEP['sc.dry'], 'context'], [STEP['sc.dough'], 'changesNow'], [STEP['sc.cut'], 'context'], [STEP['sc.tray'], 'context'], [STEP['sc.brush'], 'changesLater'], [STEP['sc.bake'], 'context'],
     ]);
-    const milk = svc.getActiveRecipe().recipe!.ingredients.find((i) => i.id === ING['cream'])!;
+    const milk = (await svc.getActiveRecipe()).recipe!.ingredients.find((i) => i.id === ING['cream'])!;
     expect(milk.uses.map((u) => u.amount)).toEqual([{ kind: 'approximate', display: 'all but a little' }, { kind: 'approximate', display: 'a little' }]);
   });
 });

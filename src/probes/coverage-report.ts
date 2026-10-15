@@ -11,6 +11,8 @@ import { readPdf } from '../authoring/source.ts';
 import { recordedAnalyzer } from '../authoring/swap-analysis.ts';
 import { hash } from '../domain/rational.ts';
 import { Service } from '../service/commands.ts';
+import { SqliteKv } from '../service/kv-sqlite.ts';
+import { modelRows } from './records.ts';
 import { loadContent } from '../service/content.ts';
 import { noneInterpreter } from '../service/interpret.ts';
 
@@ -37,21 +39,21 @@ const rows: Row[] = [];
 const repairs: { set: string; recipe: string; requested: number; status: string }[] = [];
 for (const [set, s] of Object.entries(SETS)) {
   for (const name of s.recipes) {
-    const svc = new Service({ dbPath: join(dir, `${stamp}-${label}-${set}-${name}.db`), content, interpreter: noneInterpreter, fixtureRecipes: false });
-    const auth = new Authoring({ store: svc.store, content, extractor: recordedExtractor(readings, 'REPLAY'), analyzer: recordedAnalyzer(s.cards, `REPLAY_${set}`) });
+    const svc = new Service({ kv: new SqliteKv(join(dir, `${stamp}-${label}-${set}-${name}.kv`)), content, interpreter: noneInterpreter, fixtureRecipes: false });
+    const auth = new Authoring({ kv: svc.kv, ws: svc.ws, content, extractor: recordedExtractor(readings, 'REPLAY'), analyzer: recordedAnalyzer(s.cards, `REPLAY_${set}`) });
     const f = PDF[name as keyof typeof PDF];
     const r = await auth.createImport({ kind: 'pdf', bytes: new Uint8Array(readFileSync(join(root, f))), filename: f.split('/').pop()! });
     if (r.status !== 202) throw new Error(`${name}: ${JSON.stringify(r)}`);
     await auth.waitForJob(r.job.id);
-    const c = auth.getDraft(r.draftId).draft.content!;
+    const c = (await auth.getDraft(r.draftId)).draft.content!;
     for (const i of c.ingredients) for (const u of i.uses) {
       const a = u.analysis!;
       rows.push({ set, recipe: name, ingredient: i.name, step: c.steps.find((x) => x.id === u.stepId)!.ordinal, status: a.status, offer: a.offer, code: a.reason?.code ?? null, detail: a.reason?.detail ?? null,
         plans: a.plans.map((p) => ({ planId: p.planId, ruleId: p.ruleId, kind: p.kind, title: p.title })), coveredBy: a.coveredByUseId, ruledOut: (a.ruledOut ?? []).map((r) => r.ruleId) });
     }
-    const rep = svc.store.get("SELECT 1 FROM sqlite_master WHERE name = 'swap_repairs'") ? svc.store.all<{ status: string; requested_json: string }>('SELECT status, requested_json FROM swap_repairs') : [];
+    const rep = (await modelRows(svc.kv, svc.ws, r.draftId)).repairs;
     for (const x of rep) repairs.push({ set, recipe: name, requested: (JSON.parse(x.requested_json) as unknown[]).length, status: x.status });
-    svc.close();
+    (svc.kv as SqliteKv).close();
   }
 }
 

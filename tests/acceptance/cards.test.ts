@@ -3,7 +3,6 @@
 // model call happens at cook time.
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Authoring } from '../../src/authoring/drafts.ts';
@@ -11,44 +10,45 @@ import { buildDraft, recordedExtractor } from '../../src/authoring/extract.ts';
 import { readPastedText } from '../../src/authoring/source.ts';
 import { recordedAnalyzer } from '../../src/authoring/swap-analysis.ts';
 import { checkCards, refsOf } from '../../src/compile/cards.ts';
-import { Service } from '../../src/service/commands.ts';
+import { K, Service } from '../../src/service/commands.ts';
+import { wsPk } from '../../src/service/kv.ts';
 import { noneInterpreter } from '../../src/service/interpret.ts';
 import { DEMO, demoPdf, recordedDemo, RISOTTO_CARDS, SHORTCAKE_CARDS } from '../fixtures/demo-cards.ts';
 import { RISOTTO_LINES, RISOTTO_READING, SHORTCAKE_LINES, SHORTCAKE_READING } from '../fixtures/demo-sources.ts';
-import { cmd, content, ROOT, vocab } from '../helpers.ts';
+import { cmd, content, ROOT, vocab, newKv, newWs } from '../helpers.ts';
 import { hash } from '../../src/domain/rational.ts';
 
 const rec = await recordedDemo(vocab);
 type Name = (typeof DEMO)[number]['name'];
 
 async function imported(names: Name[] = ['risotto', 'scones', 'shortcake'], cards = rec.cards, readings = rec.readings) {
-  const svc = new Service({ dbPath: join(mkdtempSync(join(tmpdir(), 'ccmcp-cards-')), 'db'), content, interpreter: noneInterpreter, fixtureRecipes: false });
-  const auth = new Authoring({ store: svc.store, content, extractor: recordedExtractor(readings), analyzer: recordedAnalyzer(cards) });
-  svc.catalog = () => auth.catalog();
+  const svc = new Service({ kv: newKv(join(mkdtempSync(join(tmpdir(), 'ccmcp-cards-')), 'db')), ws: newWs(), content, interpreter: noneInterpreter, fixtureRecipes: false });
+  const auth = new Authoring({ kv: svc.kv, ws: svc.ws, content, extractor: recordedExtractor(readings), analyzer: recordedAnalyzer(cards) });
+  svc.catalog = (t) => auth.catalogIn(t);
   const saved: Record<string, { recipeId: string; recipeVersionId: string; draftId: string }> = {};
   for (const name of names) {
     const d = DEMO.find((x) => x.name === name)!;
     const r = await auth.createImport({ kind: 'pdf', bytes: demoPdf(d.lines), filename: `${name}.pdf` });
     if (r.status !== 202) throw new Error('import');
     expect((await auth.waitForJob(r.job.id)).state).toBe('succeeded');
-    saved[name] = { ...auth.save(r.draftId, { expectedRevision: auth.revision(r.draftId) }), draftId: r.draftId };
+    saved[name] = { ...(await auth.save(r.draftId, { expectedRevision: await auth.revision(r.draftId) })), draftId: r.draftId };
   }
   return { svc, auth, saved };
 }
 
 /** Start an imported recipe, mark steps done, and ask (structured: no interpreter, no explainer). */
 async function cookTo(svc: Service, recipeId: string, done: number) {
-  const st = svc.startRecipe({ commandId: cmd(), recipeId, ...(svc.getActiveRecipe().run ? { replace: { runId: svc.getActiveRecipe().run!.id, epoch: svc.getActiveRecipe().run!.epoch, expectedRevision: svc.getActiveRecipe().run!.revision, confirm: true } } : {}) });
+  const st = await svc.startRecipe({ commandId: cmd(), recipeId, ...((await svc.getActiveRecipe()).run ? { replace: { runId: (await svc.getActiveRecipe()).run!.id, epoch: (await svc.getActiveRecipe()).run!.epoch, expectedRevision: (await svc.getActiveRecipe()).run!.revision, confirm: true } } : {}) });
   if (st.outcome !== 'started') throw new Error(JSON.stringify(st));
   let run = st.run;
   for (const s of st.recipe.steps.slice(0, done)) {
-    const r = svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: s.id, progress: 'done' });
+    const r = await svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: s.id, progress: 'done' });
     if (r.outcome !== 'recorded') throw new Error(JSON.stringify(r));
     run = r.run;
   }
   const ing = (name: RegExp) => st.recipe.ingredients.find((i) => name.test(i.name))!.id;
   const ask = async (name: RegExp, proposedKindIds: string[] = [], previous?: { id: string; answers: { questionId: string; value: 'yes' | 'no' }[] }) => {
-    const cur = svc.getActiveRecipe().run!;
+    const cur = (await svc.getActiveRecipe()).run!;
     const ev = await svc.evaluateRescue({ commandId: cmd(), runId: cur.id, epoch: cur.epoch, expectedRevision: cur.revision, missingIngredientId: ing(name), proposedKindIds,
       utterance: { text: name.source, channel: 'tapped' }, ...(previous ? { previousEvaluationId: previous.id, answers: previous.answers } : {}) });
     if (ev.outcome === 'rejected') throw new Error(ev.code);
@@ -62,9 +62,9 @@ async function cookTo(svc: Service, recipeId: string, done: number) {
   };
   return { run, ask, askAll };
 }
-const apply = (svc: Service, ev: { id: string; outcome: string; candidates?: { id: string; planId: string }[] }, accepted = true) => {
-  const run = svc.getActiveRecipe().run!;
-  return svc.applyAmendment({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, evaluationId: ev.id, candidateId: ev.candidates![0].id, planId: ev.candidates![0].planId, accepted });
+const apply = async (svc: Service, ev: { id: string; outcome: string; candidates?: { id: string; planId: string }[] }, accepted = true) => {
+  const run = (await svc.getActiveRecipe()).run!;
+  return await svc.applyAmendment({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, evaluationId: ev.id, candidateId: ev.candidates![0].id, planId: ev.candidates![0].planId, accepted });
 };
 
 describe('every ADD use of the three demo recipes has a validated card (coverage table)', () => {
@@ -73,8 +73,8 @@ describe('every ADD use of the three demo recipes has a validated card (coverage
     const rows: string[] = ['| Recipe | Step | Use | Verdict | Plan | Opinion |', '|---|---|---|---|---|---|'];
     const missing: string[] = [];
     for (const [name, s] of Object.entries(saved)) {
-      const { pack } = auth.coverageOf(s.draftId);
-      const c = auth.getDraft(s.draftId).draft.content!;
+      const { pack } = await auth.coverageOf(s.draftId);
+      const c = (await auth.getDraft(s.draftId)).draft.content!;
       for (const e of pack!.cards!) {
         const u = c.ingredients.flatMap((i) => i.uses.map((x) => ({ ...x, name: i.name }))).find((x) => x.id === e.useId)!;
         const step = c.steps.find((x) => x.id === u.stepId)!.ordinal;
@@ -90,7 +90,7 @@ describe('every ADD use of the three demo recipes has a validated card (coverage
 
   it('reviewed rules stay a cross-check: where one binds, its plan is used and the card is recorded with agreement', async () => {
     const { auth, saved } = await imported(['risotto', 'scones']);
-    const risotto = auth.coverageOf(saved.risotto.draftId).pack!, scones = auth.coverageOf(saved.scones.draftId).pack!;
+    const risotto = (await auth.coverageOf(saved.risotto.draftId)).pack!, scones = (await auth.coverageOf(saved.scones.draftId)).pack!;
     expect(risotto.warnings).toContainEqual(expect.stringMatching(/^CARD_SUPERSEDED:.*reviewed "Split the wine's jobs" is used; the card said swap \(agrees\)/));
     expect(scones.warnings).toContainEqual(expect.stringMatching(/^CARD_SUPERSEDED:.*"Butter and milk for cream in a dough".*\(agrees\)/));
     // card bindings are ordinary bindings in the same pack (no forked engine), and change the pack's identity
@@ -118,7 +118,7 @@ describe('cooking answers come from cards, with no model call beyond interpretat
     expect(e2.candidates[0]).toMatchObject({ headline: 'Use 50 g grated pecorino instead of the parmesan in step 7.', contentLabel: 'Prepared at import (AI) · not reviewed · provisional quantities · not released cooking guidance',
       consequence: { text: 'Pecorino is saltier and sharper, so taste before adding salt.' } });
     expect(e2.trace.deterministic).toMatch(/^Prepared at import \(AI\): Grated pecorino for the parmesan/);
-    const a = apply(svc, e2);
+    const a = (await apply(svc, e2));
     expect(a.outcome).toBe('applied');
     if (a.outcome !== 'applied') return;
     expect(a.run.steps[6].effectiveText).toBe('Off the heat, stir in 30 g butter and 50 g grated pecorino. Season with salt.');
@@ -138,7 +138,7 @@ describe('cooking answers come from cards, with no model call beyond interpretat
     const e2 = await b.ask(/cream/i, [], { id: e1.id, answers: [{ questionId: e1.questions[0].id, value: 'yes' }] });
     if (e2.outcome !== 'proposal') throw new Error(e2.outcome);
     expect(e2.candidates[0].contentLabel).toMatch(/^Prepared at import \(AI\)/);
-    const a = apply(svc, e2);
+    const a = (await apply(svc, e2));
     expect(a.outcome === 'applied' && a.run.steps[5].effectiveText).toBe('Brush the tops with a little milk.');
   });
 
@@ -179,9 +179,9 @@ describe('a card never contradicts a reviewed rule (live probe finding 2026-10-0
   };
   const wineAt = async (cards: Record<string, unknown>, readings = rec.readings) => {
     const { svc, auth, saved } = await imported(['risotto'], cards, readings);
-    const page = auth.getRecipe(saved.risotto.recipeId).version.content!;
+    const page = (await auth.getRecipe(saved.risotto.recipeId)).version.content!;
     const wine = page.ingredients.find((i) => /wine/i.test(i.name))!.uses[0];
-    return { svc, saved, wine, card: auth.catalog()[0].pack!.cards!.find((c) => c.useId === wine.id)! };
+    return { svc, saved, wine, card: (await auth.catalog())[0].pack!.cards!.find((c) => c.useId === wine.id)! };
   };
 
   it('split binds (roles match the table): the lemon card is invalid; the stock-now, lemon-at-finish plan stays available and applies', async () => {
@@ -195,7 +195,7 @@ describe('a card never contradicts a reviewed rule (live probe finding 2026-10-0
     if (ev.outcome !== 'proposal') throw new Error(ev.outcome);
     expect(ev.proposalResponse).toMatchObject({ response: 'ADAPTED', text: expect.stringMatching(/^There's no one-for-one lemon swap/) });
     expect(ev.candidates.map((c) => c.headline)).toEqual(['Use hot stock now and lemon juice at the finish instead of the wine.']);
-    const a = apply(svc, ev);
+    const a = (await apply(svc, ev));
     if (a.outcome !== 'applied') throw new Error(a.outcome);
     expect(a.run.steps[4].effectiveText).toBe('Pour in 120 ML hot unsalted vegetable stock and stir until absorbed.');
     expect(a.run.steps[6].effectiveText).toBe('Off the heat, stir in 30 g butter, 50 g grated Parmesan and 10 ML lemon juice. Season with salt.');
@@ -220,7 +220,7 @@ describe('a card never contradicts a reviewed rule (live probe finding 2026-10-0
     const ev = await k.askAll(/wine/i, 'yes', ['lemon-juice']);
     expect(ev.outcome).toBe('refused');
     expect(ev.proposalResponse?.response).not.toBe('REALIZED_AS_PROPOSED');
-    expect(svc.getActiveRecipe().run!.appliedAmendments).toEqual([]);
+    expect((await svc.getActiveRecipe()).run!.appliedAmendments).toEqual([]);
   });
 
   it('leaving kindId out does not hide the replacement; stock with lemon (not what the claim answers) is not affected', async () => {
@@ -270,14 +270,14 @@ describe('invalid cards fail closed (never a half-plan)', () => {
     expect(at([dough, dough, dough, dough]).reason).toBe('DUPLICATE_CARD');   // more than three for one use is malformed
     // through the import: the second suggestion is bound, and the first keeps its reason
     const { auth, saved } = await imported(['shortcake'], Object.fromEntries(Object.entries(rec.cards).map(([k, raw]) => [k, raw === SHORTCAKE_CARDS ? ranked([same, dough]) : raw])));
-    const pack = auth.coverageOf(saved.shortcake.draftId).pack!;
+    const pack = (await auth.coverageOf(saved.shortcake.draftId)).pack!;
     const useId = refsOf(pack.recipe).uses[dough.useRef as unknown as string];
     expect(pack.cards!.find((e) => e.useId === useId)!.alternates).toEqual([{ name: 'heavy cream', reason: SAME }, { name: dough.swap.ingredient, reason: null, used: true }]);
     expect(pack.bindings.some((b) => b.card && b.targetUseId === useId)).toBe(true);
     // only the same ingredient under another name was suggested: no alternative was drafted, so "no alternative found"
     const only = await imported(['shortcake'], Object.fromEntries(Object.entries(rec.cards).map(([k, raw]) => [k, raw === SHORTCAKE_CARDS ? ranked([same]) : raw])));
-    const p2 = only.auth.coverageOf(only.saved.shortcake.draftId).pack!, u2 = refsOf(p2.recipe).uses[dough.useRef as unknown as string];
-    const a2 = only.auth.wireDraft(only.saved.shortcake.draftId).content!.ingredients.flatMap((g) => g.uses).find((x) => x.id === u2)!.analysis!;
+    const p2 = (await only.auth.coverageOf(only.saved.shortcake.draftId)).pack!, u2 = refsOf(p2.recipe).uses[dough.useRef as unknown as string];
+    const a2 = (await only.auth.wireDraft(only.saved.shortcake.draftId)).content!.ingredients.flatMap((g) => g.uses).find((x) => x.id === u2)!.analysis!;
     expect(a2).toMatchObject({ status: 'evaluatedNoOption', reason: { code: 'sameIngredient', text: expect.stringMatching(/^The import analysis suggested heavy cream, which is the cream under another name, so there’s no alternative to offer here\./) } });
   });
   it('normalization: only meaning-preserving repairs, each named; contradictory forms still fail', () => {
@@ -314,7 +314,7 @@ describe('invalid cards fail closed (never a half-plan)', () => {
         opinion: 'Use milk if you run out of heavy cream; the shortcake will still come together but may be less moist.' });
     }
     const { svc, auth, saved } = await imported(['shortcake'], bad);
-    expect(auth.coverageOf(saved.shortcake.draftId).pack!.warnings).toContainEqual(expect.stringMatching(/^CARD_INVALID:.*COVERS_A_REFUSED_USE: step 6 \(Milk and butter for cream that must whip\)/));
+    expect((await auth.coverageOf(saved.shortcake.draftId)).pack!.warnings).toContainEqual(expect.stringMatching(/^CARD_INVALID:.*COVERS_A_REFUSED_USE: step 6 \(Milk and butter for cream that must whip\)/));
     const k = await cookTo(svc, saved.shortcake.recipeId, 3);
     const e4 = await k.ask(/cream/i, ['whole-milk']);
     expect(e4.outcome === 'refused' && e4.why.verdict).toBe('no');   // never a plan that whips milk
@@ -324,10 +324,10 @@ describe('invalid cards fail closed (never a half-plan)', () => {
     const bad = structuredClone(rec.cards);
     for (const v of Object.values(bad) as { cards: { useRef: string; siblings: unknown[] }[] }[]) for (const c of v.cards) if (c.useRef === 'U6' && c.siblings.length === 1) c.siblings = [];
     const { auth, saved } = await imported(['shortcake'], bad);
-    const c = auth.getDraft(saved.shortcake.draftId).draft.content!;
+    const c = (await auth.getDraft(saved.shortcake.draftId)).draft.content!;
     const doughUse = c.ingredients.find((i) => /cream/i.test(i.name))!.uses[0];
     expect(doughUse.swap).toMatchObject({ text: expect.stringMatching(/^We couldn't work out a swap for this one/), origin: 'importCard' });
-    expect(auth.coverageOf(saved.shortcake.draftId).pack!.warnings).toContainEqual(expect.stringMatching(/^CARD_INVALID:.*SIBLING_MISSED: step 6/));
+    expect((await auth.coverageOf(saved.shortcake.draftId)).pack!.warnings).toContainEqual(expect.stringMatching(/^CARD_INVALID:.*SIBLING_MISSED: step 6/));
   });
 });
 
@@ -336,8 +336,8 @@ describe('protections hold on card plans (same engine)', () => {
     const { svc, saved } = await imported(['risotto']);
     // started step
     let k = await cookTo(svc, saved.risotto.recipeId, 6);
-    const run = svc.getActiveRecipe().run!;
-    const st = svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: run.steps[6].stepId, progress: 'started' });
+    const run = (await svc.getActiveRecipe()).run!;
+    const st = await svc.recordProgress({ commandId: cmd(), runId: run.id, epoch: run.epoch, expectedRevision: run.revision, stepId: run.steps[6].stepId, progress: 'started' });
     expect(st.outcome).toBe('recorded');
     const pw = await k.ask(/parmesan/i);
     expect(pw.outcome === 'refused' && pw.refusal.kind).toBe('protectedWork');
@@ -349,16 +349,17 @@ describe('protections hold on card plans (same engine)', () => {
     k = await cookTo(svc, saved.risotto.recipeId, 6);
     const ev = await k.askAll(/^salt/i);
     if (ev.outcome !== 'proposal') throw new Error(ev.outcome);
-    expect(apply(svc, ev, false)).toMatchObject({ outcome: 'rejected', code: 'ACCEPTANCE_REQUIRED' });
-    const first = apply(svc, ev);
+    expect((await apply(svc, ev, false))).toMatchObject({ outcome: 'rejected', code: 'ACCEPTANCE_REQUIRED' });
+    const first = (await apply(svc, ev));
     expect(first.outcome).toBe('applied');
-    expect(apply(svc, ev)).toMatchObject({ outcome: 'rejected', code: 'STALE_STATE' });   // the run moved on: never applied twice
-    expect(svc.getActiveRecipe().run!.appliedAmendments).toHaveLength(1);
+    expect((await apply(svc, ev))).toMatchObject({ outcome: 'rejected', code: 'STALE_STATE' });   // the run moved on: never applied twice
+    expect((await svc.getActiveRecipe()).run!.appliedAmendments).toHaveLength(1);
     // a later change may not rewrite a step an earlier change altered (salt omit rewrote step 7; the Parmesan card touches step 7)
     const conflict = await k.askAll(/parmesan/i);
     expect(conflict.outcome === 'refused' && conflict.refusal.kind).toBe('earlierChangeConflict');
     // at most 4 changes per run
-    svc.store.run('UPDATE runs SET applied_rescue_count = 4 WHERE run_id = ?', svc.getActiveRecipe().run!.id);
+    const runKey = { pk: wsPk(svc.ws), sk: K.run((await svc.getActiveRecipe()).run!.id) }, row = (await svc.kv.get(runKey))!;
+    await svc.kv.write([{ put: { ...row, appliedRescueCount: 4, v: row.v! + 1 }, if: row.v! }]);
     const limit = await k.askAll(/butter/i);
     expect(limit.outcome === 'refused' && limit.refusal.kind).toBe('rescueLimitReached');
   });
@@ -368,23 +369,26 @@ describe('protections hold on card plans (same engine)', () => {
     const other = structuredClone(rec.cards);
     for (const v of Object.values(other) as { cards: { useRef: string; opinion: string }[] }[]) for (const c of v.cards) if (c.useRef === 'U9') c.opinion = 'Fill the shortcakes with 500 g raspberries.';
     const b = await imported(['shortcake'], other);
-    const pa = a.auth.catalog()[0].pack!, pb = b.auth.catalog()[0].pack!;
+    const pa = (await a.auth.catalog())[0].pack!, pb = (await b.auth.catalog())[0].pack!;
     expect(pa.cardSetHash).not.toBe(pb.cardSetHash);
-    expect(pa.packHash).toBe(hash({ recipeHash: pa.recipeHash, vocabularyHash: pa.vocabularyHash, patternSetHash: pa.patternSetHash, engineSemantics: pa.engineSemantics, cardSetHash: pa.cardSetHash }));
+    expect(pa.packHash).toBe(hash({ recipeHash: pa.recipeHash, vocabularyHash: pa.vocabularyHash, patternSetHash: pa.patternSetHash, engineSemantics: pa.engineSemantics, cardSetHash: pa.cardSetHash, knowledgeReleaseId: pa.knowledgeReleaseId }));
+    expect(pa.knowledgeReleaseId).toBe(content.releaseId);   // the import's pinned release is part of the pack's identity
     // a run is pinned to the pack it started on
-    const st = a.svc.startRecipe({ commandId: cmd(), recipeId: a.saved.shortcake.recipeId });
-    expect(st.outcome === 'started' && a.svc.store.get<{ pack_hash: string }>('SELECT pack_hash FROM runs WHERE run_id = ?', st.run.id)!.pack_hash).toBe(pa.packHash);
+    const st = await a.svc.startRecipe({ commandId: cmd(), recipeId: a.saved.shortcake.recipeId });
+    expect(st.outcome === 'started' && (await a.svc.kv.get({ pk: wsPk(a.svc.ws), sk: K.run(st.run.id) }))!.packHash).toBe(pa.packHash);
   });
 });
 
 describe('start over', () => {
-  it('archives first, then clears sessions and every import; nothing is restored', async () => {
+  it('a fresh workspace on the same store is empty; the previous kitchen is kept and nothing is restored', async () => {
     const { svc, saved } = await imported(['risotto', 'shortcake']);
     await cookTo(svc, saved.shortcake.recipeId, 1);
-    const archive = join(mkdtempSync(join(tmpdir(), 'ccmcp-arch-')), 'a.db');
-    svc.startOver(archive);
-    expect(svc.listRecipes().recipes).toEqual([]);                                   // this service lists no examples (fixtureRecipes: false)
-    expect(svc.getActiveRecipe().run).toBeNull();
-    expect(new DatabaseSync(archive, { readOnly: true }).prepare('SELECT COUNT(*) AS n FROM saved_recipes').get()).toEqual({ n: 2 });   // the copy kept both
+    const fresh = new Service({ kv: svc.kv, ws: newWs(), content, interpreter: noneInterpreter, fixtureRecipes: false });
+    const freshAuth = new Authoring({ kv: svc.kv, ws: fresh.ws, content, extractor: recordedExtractor({}) });
+    fresh.catalog = (t) => freshAuth.catalogIn(t);
+    expect((await fresh.listRecipes()).recipes).toEqual([]);                                   // this service lists no examples (fixtureRecipes: false)
+    expect((await fresh.getActiveRecipe()).run).toBeNull();
+    expect((await svc.listRecipes()).recipes).toHaveLength(2);                                 // the previous kitchen is kept
+    expect((await svc.getActiveRecipe()).run).not.toBeNull();
   });
 });

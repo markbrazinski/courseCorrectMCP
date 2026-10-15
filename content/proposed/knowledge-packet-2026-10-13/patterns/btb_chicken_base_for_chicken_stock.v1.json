@@ -1,0 +1,208 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "RECOVERY",
+  "patternId": "btb_chicken_base_for_chicken_stock",
+  "version": 1,
+  "title": "Water and Better Than Bouillon chicken base for chicken stock or broth",
+  "target": {
+    "ingredientClass": "chicken-stock-or-broth",
+    "performsAll": [
+      "LIQUID",
+      "FLAVOR"
+    ],
+    "stepTechnique": "SIMMER"
+  },
+  "slots": [],
+  "applicability": [],
+  "exceptions": [],
+  "evidence": {
+    "quantityStatus": "SOURCED",
+    "approval": "COMMISSIONED_PENDING_OWNER_CONFIRMATION",
+    "basis": "Knowledge packet 2026-10-13 item E4, PROPOSED (not approved). Research bouillon_or_base_reconstituted_for_stock (SOURCE_SUPPORTED): Better Than Bouillon SRC-ST-16#a (1 teaspoon in 8 oz hot or boiling water = one 8-oz can of broth). Product-specific by design: there is no generic bouillon ratio (Knorr cubes 1 per 2 cups vs Herb-Ox and Maggi 1 per cup, SRC-ST-20#a, SRC-ST-17#a, SRC-ST-21#a), so this names one product. Chicken stock or broth only: a vegetable stock in a vegetarian dish needs a vegetable base (research condition), not this. Sodium: ATK suggests less base to lower salt without a number (SRC-ST-07#c): stated in the tradeoff, not applied. Input bounds 1/2-12 cups are engineering bounds."
+  },
+  "introduces": [
+    {
+      "local": "water",
+      "kindId": "water",
+      "name": "Water"
+    },
+    {
+      "local": "base",
+      "kindId": "better-than-bouillon-chicken-base",
+      "name": "Better Than Bouillon chicken base"
+    }
+  ],
+  "quantities": {
+    "water": {
+      "kind": "SCALE",
+      "from": {
+        "listedTotalOf": "$target"
+      },
+      "sourceUnit": "ML",
+      "factor": {
+        "n": 1,
+        "d": 1
+      },
+      "resultUnit": "ML",
+      "inputDomain": [
+        {
+          "n": 120,
+          "d": 1
+        },
+        {
+          "n": 2880,
+          "d": 1
+        }
+      ],
+      "increment": {
+        "n": 1,
+        "d": 100
+      },
+      "maxAbsError": {
+        "n": 1,
+        "d": 200
+      },
+      "outputDomain": [
+        {
+          "n": 120,
+          "d": 1
+        },
+        {
+          "n": 2880,
+          "d": 1
+        }
+      ],
+      "display": "CUPS"
+    },
+    "base": {
+      "kind": "SCALE",
+      "from": {
+        "listedTotalOf": "$target"
+      },
+      "sourceUnit": "ML",
+      "factor": {
+        "n": 1,
+        "d": 48
+      },
+      "resultUnit": "ML",
+      "inputDomain": [
+        {
+          "n": 120,
+          "d": 1
+        },
+        {
+          "n": 2880,
+          "d": 1
+        }
+      ],
+      "increment": {
+        "n": 1,
+        "d": 100
+      },
+      "maxAbsError": {
+        "n": 1,
+        "d": 200
+      },
+      "outputDomain": [
+        {
+          "n": 5,
+          "d": 2
+        },
+        {
+          "n": 60,
+          "d": 1
+        }
+      ],
+      "display": "SPOONS"
+    }
+  },
+  "ops": [
+    {
+      "op": "REPLACE_USE",
+      "use": "$target",
+      "with": {
+        "local": "water_use",
+        "ingredient": {
+          "introduce": "water"
+        },
+        "at": "$target.step",
+        "qty": "water",
+        "prepNote": null,
+        "functions": [
+          "LIQUID"
+        ],
+        "allowance": null
+      }
+    },
+    {
+      "op": "ADD_USE",
+      "use": {
+        "local": "base_use",
+        "ingredient": {
+          "introduce": "base"
+        },
+        "at": "$target.step",
+        "qty": "base",
+        "prepNote": null,
+        "functions": [
+          "FLAVOR"
+        ],
+        "allowance": null
+      },
+      "placement": {
+        "beside": "water_use",
+        "joiner": "with"
+      }
+    },
+    {
+      "op": "APPEND_STEP_NOTE",
+      "step": "$target.step",
+      "text": "Dissolve the base in the water, hot, before it goes in, and taste before adding the recipe's salt."
+    },
+    {
+      "op": "SET_RESUME",
+      "step": "$target.step"
+    }
+  ],
+  "siblingHandlers": [],
+  "functionAccounting": [
+    {
+      "from": "$target",
+      "functionId": "LIQUID",
+      "disposition": "RETAINED",
+      "to": "water_use"
+    },
+    {
+      "from": "$target",
+      "functionId": "FLAVOR",
+      "disposition": "MOVED",
+      "to": "base_use"
+    }
+  ],
+  "introducedFunctions": [
+    {
+      "local": "base_use",
+      "functionId": "FLAVOR"
+    }
+  ],
+  "consequence": {
+    "outcomeClass": "SUBSTITUTED",
+    "equivalence": "NOT_EQUIVALENT",
+    "headline": "Use water with Better Than Bouillon chicken base instead.",
+    "reason": "Better Than Bouillon's directions: a teaspoon of base in 8 ounces of hot water makes the equivalent of 8 ounces of broth.",
+    "tradeoff": "Usually saltier than stock and without its body, so taste before salting. The ratio is for this base only; cubes and other bases differ, some by half. Not kitchen-tested in this recipe."
+  },
+  "proposal": {
+    "classes": [
+      "bouillon-base"
+    ],
+    "relation": "REALIZED_AS_PROPOSED",
+    "text": "Yes, Better Than Bouillon chicken base dissolved in water."
+  },
+  "guards": [
+    {
+      "kind": "CURRENT_STEP_IS",
+      "step": "$target.step"
+    }
+  ]
+}

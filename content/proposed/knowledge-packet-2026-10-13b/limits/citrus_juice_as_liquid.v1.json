@@ -1,0 +1,21 @@
+{
+  "schema": "cc-limit/1",
+  "limitId": "citrus_juice_as_liquid",
+  "version": 1,
+  "title": "Citrus juice in place of a recipe's liquid",
+  "classes": [
+    "citrus-juice"
+  ],
+  "replacing": [
+    "LIQUID"
+  ],
+  "maxFraction": {
+    "n": 1,
+    "d": 16
+  },
+  "reason": "The sources use lemon juice to sour or brighten a liquid at no more than 1 tablespoon per cup of it, never as the liquid itself.",
+  "evidence": {
+    "approval": "COMMISSIONED_PENDING_OWNER_CONFIRMATION",
+    "basis": "Knowledge packet 2026-10-13b item L1, PROPOSED (not approved). Found tracing the popovers card (7/8 cup lemon juice for 7/8 cup milk). Research lemon_juice_1to1_for_wine_at_deglaze (PARTIALLY_SOURCED): \"No source endorses undiluted lemon juice at the wine's full volume. Sourced acid amounts are 1/48 to 1/16\"; lemon juice pH 2.03-2.62 (SRC-AC-10, SRC-AC-11, SRC-AC-26). E2's sources: 1 tbsp acid per cup of milk (King Arthur SRC-CM-26#a; USU, NDSU/Purdue, OSU, Illinois, NC State, Land O'Lakes). The ceiling 1/16 (1 tbsp per cup) is the largest sourced amount. Lemon juice is the only citrus juice in the vocabulary; vinegar has no kind, so vinegar as a liquid is NOT limited (known gap)."
+  }
+}

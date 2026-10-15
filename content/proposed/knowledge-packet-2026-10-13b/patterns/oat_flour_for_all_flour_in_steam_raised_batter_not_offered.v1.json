@@ -1,0 +1,58 @@
+{
+  "schema": "cc-pattern/1",
+  "kind": "REFUSAL",
+  "patternId": "oat_flour_for_all_flour_in_steam_raised_batter_not_offered",
+  "version": 1,
+  "title": "Oat flour for all the flour in an egg batter baked to rise by steam",
+  "target": {
+    "ingredientClass": "flour",
+    "performsAll": [
+      "STRUCTURE"
+    ],
+    "stepTechnique": "COMBINE_DRY"
+  },
+  "slots": [],
+  "applicability": [
+    {
+      "kind": "RECIPE_HAS_USE_OF_CLASS",
+      "classId": "egg",
+      "expect": true
+    },
+    {
+      "kind": "STEP_TEXT_MATCHES",
+      "slot": "$target.step",
+      "andLater": true,
+      "cues": [
+        "\\bbak\\w*\\b",
+        "\\boven\\b"
+      ]
+    }
+  ],
+  "exceptions": [
+    {
+      "exceptionId": "chemically_leavened",
+      "when": {
+        "kind": "RECIPE_HAS_USE_OF_CLASS",
+        "classId": "leavener",
+        "expect": true
+      },
+      "reason": "A chemically leavened recipe is covered by oat_flour_for_all_flour_not_offered."
+    }
+  ],
+  "evidence": {
+    "quantityStatus": "NONE",
+    "approval": "COMMISSIONED_PENDING_OWNER_CONFIRMATION",
+    "basis": "Knowledge packet 2026-10-13b item F, PROPOSED (not approved). Closes the scope gap in R1's oat_flour_for_all_flour_not_offered@1, whose \"dough that rises\" is encoded as \"has a leavener\": popovers and Yorkshire pudding rise with none. Sources: America's Test Kitchen, Muffin Tin Popovers (recipe 15310, fetched 2026-10-13): \"there's no yeast or chemical leaveners (baking powder or baking soda) in this batter\", \"these popovers rely on the power of steam to give them a lift\", \"Using higher-protein bread flour instead of all-purpose means there's enough structure in the popovers\"; King Arthur Baking blog, \"Never-fail popovers: fact or fiction?\" (2010-04-15): \"a steam-filled wonder that magically bakes up to nearly triple its original size\". The disagreement it carries is R1's (D-5: KA up to half, Bob's Red Mill up to a fifth, Quaker all of it only when the bake doesn't need to rise). ENGINEERING INFERENCE: \"an egg batter that is baked\" as the detectable sign of a steam-raised bake (eggs are in every steam-raised batter in the sources; a baked recipe with no egg and no leavener, e.g. shortbread, is left to Quaker's \"doesn't need to rise\"). Not kitchen-tested."
+  },
+  "proposal": {
+    "classes": [
+      "oat-flour"
+    ],
+    "match": "EQUALS"
+  },
+  "response": "NOT_FUNCTIONALLY_EQUIVALENT",
+  "requiredFunctionLabel": "structure",
+  "text": "CourseCorrect doesn't offer oat flour in place of all the flour in this batter: it rises by steam in the oven, and the flour is its structure. For a bake that has to rise, the sources disagree (King Arthur Baking says up to half, Bob's Red Mill up to a fifth; Quaker allows all of it only when the bake doesn't need to rise).",
+  "scopeNote": "This is about replacing all of the flour here. It isn't a verdict on oat-flour recipes or on using some oat flour.",
+  "answer": "isn't offered here, because the sources disagree"
+}
