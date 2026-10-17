@@ -30,7 +30,7 @@
 # Schemas.
 !/schemas/**/*.json
 
-# M1 (owner-authorized 2026-10-01): project config and approved engineering content.
+# Project config and approved content.
 !/package.json
 !/package-lock.json
 !/tsconfig.json
@@ -38,7 +38,7 @@
 # Proposed knowledge packets (2026-10-13): reviewable, never loaded by the product (only as test/report overlays).
 !/content/proposed/**/*.json
 
-# M3 (companion build and browser checks): exact paths only.
+# Companion build and browser checks: exact paths only.
 !/vite.config.ts
 !/vitest.config.ts
 !/playwright.config.ts
@@ -197,7 +197,8 @@ temp/
 # ---------------------------------------------------------------------------
 !/README.md
 !/SETUP.md
-# The owner-authored sample recipe (OD-6, ENGINEERING demo content), for import by users and the review tests.
+!/FRICTION-LOG.md
+# The sample recipe PDF, for trying an import and for the review tests.
 !/samples/
 !/samples/scones-explicit.pdf
 # README screenshots (2026-10-14): exact files only.

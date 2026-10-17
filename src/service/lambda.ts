@@ -3,7 +3,7 @@
 //   worker: { job: { ws, jobId } }, an asynchronous invocation the web function makes when an import is queued → claim and
 //           run that job (drafts.ts runJob: a duplicate or late delivery does nothing). Never reachable over HTTP.
 // Env (set by the template; secrets as NoEcho parameters):
-//   CC_TABLE, CC_KNOWLEDGE_TABLE (read only: knowledge releases the owner publishes), CC_BUCKET, CC_WORKER_FUNCTION (web only), CC_SESSION_KEY (base64, ≥32 bytes), CC_ACCESS_CODE_SHA256 (comma list),
+//   CC_TABLE, CC_KNOWLEDGE_TABLE (read only: knowledge releases the owner publishes), CC_BUCKET, CC_WORKER_FUNCTION (web only), CC_SESSION_KEY (base64, ≥32 bytes), CC_JUDGE_CODE_SHA256 (optional: the judge link's code, tier "judge"), CC_ACCESS_CODE_SHA256 (comma list),
 //   CC_AWS_IDENTITY=role/<execution role>, CC_LIVE, CC_EXTRACTOR none|live, CC_ANALYZER none|live, CC_INTERPRETER none|nova,
 //   CC_EXPLAINER none|nova, CC_SPEECH off|polly, CC_OCR off|textract (PDF pages without readable text; needs CC_LIVE=1), CC_PUBLIC_ORIGIN (optional extra origin), CC_MAX_PDF_BYTES (default 4 MB).
 // Paid calls are reserved in the deployed ledger (KvLedger) under the authorization item the owner records with
@@ -78,7 +78,9 @@ const workspace = (ws: string) => {
   svc.catalog = (t) => authoring.catalogIn(t);
   return { svc, authoring };
 };
-const gate = new Gate({ kv, ledger, codeHashes: env('CC_ACCESS_CODE_SHA256').split(',').map((s) => s.trim()).filter(Boolean), sessionKey: Buffer.from(env('CC_SESSION_KEY'), 'base64'), secure: process.env.CC_INSECURE_COOKIE !== '1' });
+const hashes = (v: string | undefined) => (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+const judge = hashes(process.env.CC_JUDGE_CODE_SHA256);   // optional: the judge link's code, under Authorization.tiers.judge
+const gate = new Gate({ kv, ledger, codeHashes: hashes(env('CC_ACCESS_CODE_SHA256')), tierCodes: judge.length ? { judge } : {}, sessionKey: Buffer.from(env('CC_SESSION_KEY'), 'base64'), secure: process.env.CC_INSECURE_COOKIE !== '1' });
 const web = app({
   workspace, gate, speaker, webRoot: join(import.meta.dirname, '../../dist/web'), health: { interpreter: interpreter.mode, knowledge: () => activeReleaseId(knowledgeKv) }, maintenance: () => maintenanceMode(kv),
   origins: (url) => [url.origin, ...(process.env.CC_PUBLIC_ORIGIN ? [process.env.CC_PUBLIC_ORIGIN] : [])],

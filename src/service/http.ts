@@ -84,7 +84,7 @@ export function app(o: AppOptions): Handler {
         // a browser session (cookie), or an MCP client's bearer token for one workspace (no cookie, so no CSRF; a foreign Origin is still refused above)
         const bearer = o.gate.bearer(req.headers.get('authorization'));
         const s = bearer ?? o.gate.session(req.headers.get('cookie'));
-        if (!s) return wantsPage(req) ? html(200, signInPage()) : json(401, { error: { code: 'SIGN_IN_REQUIRED', message: 'Your session ended. Reload the page and sign in.' } });
+        if (!s) return wantsPage(req) ? html(200, signInPage('', url.searchParams.get('code') ?? '')) : json(401, { error: { code: 'SIGN_IN_REQUIRED', message: 'Your session ended. Reload the page and sign in.' } });
         if (!bearer && req.method !== 'GET' && req.method !== 'HEAD' && !origin) return json(403, { error: 'Origin required' });   // a browser always sends it on POST
         if (url.pathname === '/mcp-token' && req.method === 'GET') {
           if (bearer) return json(403, { error: { code: 'BROWSER_ONLY', message: 'Ask for a token from a signed-in browser.' } });
@@ -109,7 +109,7 @@ export function app(o: AppOptions): Handler {
 }
 
 async function signIn(gate: Gate, req: Request, sourceIp: string, url: URL) {
-  if (req.method !== 'POST') return html(200, signInPage());
+  if (req.method !== 'POST') return html(200, signInPage('', url.searchParams.get('code') ?? ''));
   const form = (req.headers.get('content-type') ?? '').includes('application/json');
   const text = Buffer.from(await raw(req, 10_000)).toString('utf8');
   const code = form ? String((JSON.parse(text || '{}') as { code?: unknown }).code ?? '') : new URLSearchParams(text).get('code') ?? '';

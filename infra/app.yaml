@@ -14,6 +14,7 @@ Parameters:
   Version: { Type: String, Description: 'Build identity shown by status' }
   SessionKey: { Type: String, NoEcho: true, Description: 'base64, at least 32 bytes; signs session cookies' }
   AccessCodeSha256: { Type: String, NoEcho: true, Description: 'comma-separated SHA-256 hex of the judge access codes' }
+  JudgeCodeSha256: { Type: String, NoEcho: true, Default: '', Description: 'SHA-256 hex of the judge link code (its workspaces spend from the authorization tier "judge"); empty: no judge link' }
   Live: { Type: String, AllowedValues: ['0', '1'], Default: '0' }
   Extractor: { Type: String, AllowedValues: [none, live], Default: none }
   Analyzer: { Type: String, AllowedValues: [none, live], Default: none }
@@ -118,6 +119,7 @@ Resources:
           CC_BUCKET: !Ref BucketName
           CC_SESSION_KEY: !Ref SessionKey
           CC_ACCESS_CODE_SHA256: !Ref AccessCodeSha256
+          CC_JUDGE_CODE_SHA256: !Ref JudgeCodeSha256
           CC_AWS_IDENTITY: !Sub role/cc-${Env}-fn
           CC_LIVE: !Ref Live
           CC_EXTRACTOR: !Ref Extractor
@@ -156,6 +158,7 @@ Resources:
           CC_BUCKET: !Ref BucketName
           CC_SESSION_KEY: !Ref SessionKey
           CC_ACCESS_CODE_SHA256: !Ref AccessCodeSha256
+          CC_JUDGE_CODE_SHA256: !Ref JudgeCodeSha256
           CC_AWS_IDENTITY: !Sub role/cc-${Env}-fn
           CC_LIVE: !Ref Live
           CC_EXTRACTOR: !Ref Extractor

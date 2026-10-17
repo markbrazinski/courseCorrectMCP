@@ -30,7 +30,14 @@ export interface Authorization {
   maxNewWorkspacesPerDay?: number;
   /** Deployed: the owner's stop. Every reservation is refused while true. */
   paused?: boolean;
+  /** Deployed: a separate allowance for workspaces opened with a tier's own access code (the judge link). Their calls count
+   *  against the tier's caps instead of maxCalls, maxUsd, maxUsdByPurpose and perWorkspace; the project ceiling and the
+   *  pause still bind. */
+  tiers?: Record<string, Tier>;
 }
+export interface Tier { maxCalls: Partial<Record<Purpose, number>>; maxUsd: number; perWorkspace: { maxCalls: Partial<Record<Purpose, number>>; maxUsd: number }; maxNewWorkspacesPerDay: number }
+/** The tier a workspace was opened under (written once by the gate, on its GATE row), or null. */
+export const tierOf = async (kv: Kv, ws: string | null): Promise<string | null> => (ws ? ((await kv.get({ pk: 'GATE', sk: `WS#${ws}` }))?.tier as string | undefined) ?? null : null);
 interface Entry { at: string; key: string; kind: 'reserve' | 'settle' | 'failed'; purpose: Purpose; usd: number; authorization: string; label: string; inputTokens?: number; outputTokens?: number; characters?: number }
 export class BudgetExceeded extends Error {}
 /** Which workspace a live call is spent for (set by the HTTP layer and the import worker; read by KvLedger). */
@@ -93,7 +100,7 @@ export class Ledger implements SpendLedger {
 // ---------- the deployed ledger: one partition (pk LEDGER) plus each workspace's usage item ----------
 export const LEDGER = 'LEDGER';
 interface Totals { calls: Partial<Record<Purpose, number>>; usd: number; /** dollars per purpose (absent on totals written before 2026-10-13) */ usdBy?: Partial<Record<Purpose, number>>; v?: number }
-interface Reservation { key: string; purpose: Purpose; usd: number; ws: string | null; authorization: string; label: string; at: string; state: 'reserved' | 'settled' | 'failed'; settledUsd?: number; inputTokens?: number; outputTokens?: number; characters?: number; refusedBy?: string; v?: number }
+interface Reservation { key: string; purpose: Purpose; usd: number; ws: string | null; authorization: string; /** the totals row it counts in (absent before tiers: TOTAL#<authorization>) */ pool?: string; label: string; at: string; state: 'reserved' | 'settled' | 'failed'; settledUsd?: number; inputTokens?: number; outputTokens?: number; characters?: number; refusedBy?: string; v?: number }
 const round = (x: number) => Math.round(x * 1e9) / 1e9;
 /** Earlier tables' spending (LEDGER CARRIED: closed lifetimes, see src/ops/lifecycle.ts): for one authorization, and in all. */
 function carried(car: Item | undefined, authId: string) {
@@ -125,24 +132,31 @@ export class KvLedger implements SpendLedger {
   async authorization(): Promise<(Authorization & Item) | undefined> { return await this.kv.get(this.key('AUTH')) as (Authorization & Item) | undefined; }
   async reserve(purpose: Purpose, key: string, usd: number, label: string) {
     const ws = spender.getStore() ?? null;
+    const tierName = await tierOf(this.kv, ws);   // fixed when the workspace was opened
     for (let attempt = 0; attempt < 8; attempt++) {
       const auth = await this.authorization();
       if (!auth) throw new BudgetExceeded('no live authorization is recorded for this deployment');
       if (auth.paused) throw new BudgetExceeded('paid model work is paused by the owner');
-      const totK = this.key(`TOTAL#${auth.id}`), allK = this.key('TOTAL#ALL'), carK = this.key('CARRIED'), useK = ws ? { pk: wsPk(ws), sk: `USAGE#${auth.id}` } : null;
+      const tier = tierName ? auth.tiers?.[tierName] : undefined;
+      if (tierName && !tier) throw new BudgetExceeded(`no allowance is recorded for this workspace's tier (${tierName})`);
+      const caps = tier ?? auth;
+      const totK = this.key(tier ? `TOTAL#${auth.id}#${tierName}` : `TOTAL#${auth.id}`), allK = this.key('TOTAL#ALL'), carK = this.key('CARRIED'), useK = ws ? { pk: wsPk(ws), sk: `USAGE#${auth.id}` } : null;
       const [tot, all, use, car] = await Promise.all([this.kv.get(totK), this.kv.get(allK), useK ? this.kv.get(useK) : undefined, this.kv.get(carK)]) as (Totals & Item | undefined)[];
       const t: Totals = { calls: { ...tot?.calls }, usd: tot?.usd ?? 0, usdBy: { ...tot?.usdBy } }, u: Totals = { calls: { ...use?.calls }, usd: use?.usd ?? 0, usdBy: { ...use?.usdBy } };
-      const was = carried(car, auth.id);   // spending of this environment's earlier tables (lifecycle.ts): never reset by a rebuild
-      const cap = auth.maxCalls[purpose] ?? 0;   // a purpose the authorization doesn't name is not authorized
+      const earlier = carried(car, auth.id);   // spending of this environment's earlier tables (lifecycle.ts): never reset by a rebuild
+      // ponytail: a tier's own totals aren't carried across a rebuild (lifecycle.ts carries per authorization); the project ceiling, which is, still bounds them
+      const was = tier ? { ...earlier, calls: {}, usd: 0, usdBy: {} as Partial<Record<Purpose, number>> } : earlier;
+      const cap = caps.maxCalls[purpose] ?? 0;   // a purpose the authorization doesn't name is not authorized
       if ((t.calls[purpose] ?? 0) + (was.calls[purpose] ?? 0) + 1 > cap) throw new BudgetExceeded(`${purpose} call cap ${cap} reached`);
-      if (t.usd + was.usd + usd > auth.maxUsd) throw new BudgetExceeded(`reservation would exceed $${auth.maxUsd} authorization`);
+      if (t.usd + was.usd + usd > caps.maxUsd) throw new BudgetExceeded(`reservation would exceed $${caps.maxUsd} authorization`);
       if (auth.priorProjectUsd + (all?.usd ?? 0) + was.allUsd + usd > auth.projectCeilingUsd) throw new BudgetExceeded('reservation would exceed the project ceiling');
-      const pcap = auth.maxUsdByPurpose?.[purpose];
+      const pcap = tier ? undefined : auth.maxUsdByPurpose?.[purpose];
       if (pcap !== undefined && (t.usdBy![purpose] ?? 0) + (was.usdBy[purpose] ?? 0) + usd > pcap) throw new BudgetExceeded(`reservation would exceed the $${pcap} ${purpose} allowance`);
-      if (useK && auth.perWorkspace) {
-        const wcap = auth.perWorkspace.maxCalls[purpose] ?? 0;
+      const per = caps.perWorkspace;
+      if (useK && per) {
+        const wcap = per.maxCalls[purpose] ?? 0;
         if ((u.calls[purpose] ?? 0) + 1 > wcap) throw new BudgetExceeded(`this workspace's ${purpose} allowance (${wcap}) is used up`);
-        if (u.usd + usd > auth.perWorkspace.maxUsd) throw new BudgetExceeded(`this workspace's $${auth.perWorkspace.maxUsd} allowance is used up`);
+        if (u.usd + usd > per.maxUsd) throw new BudgetExceeded(`this workspace's $${per.maxUsd} allowance is used up`);
       }
       const bump = (x: Totals) => ({ calls: { ...x.calls, [purpose]: (x.calls[purpose] ?? 0) + 1 }, usd: round(x.usd + usd), usdBy: { ...x.usdBy, [purpose]: round((x.usdBy?.[purpose] ?? 0) + usd) } });
       const ops: Op[] = [
@@ -150,7 +164,7 @@ export class KvLedger implements SpendLedger {
         { check: carK, if: car?.v ?? 'absent' },
         { put: { ...totK, ...bump(t), v: (tot?.v ?? 0) + 1 }, if: tot?.v ?? 'absent' },
         { put: { ...allK, usd: round((all?.usd ?? 0) + usd), v: (all?.v ?? 0) + 1 }, if: all?.v ?? 'absent' },
-        { put: { ...this.key(`R#${key}`), key, purpose, usd, ws, authorization: auth.id, label, at: new Date().toISOString(), state: 'reserved', v: 1 } satisfies Reservation & Item, if: 'absent' },
+        { put: { ...this.key(`R#${key}`), key, purpose, usd, ws, authorization: auth.id, pool: totK.sk, label, at: new Date().toISOString(), state: 'reserved', v: 1 } satisfies Reservation & Item, if: 'absent' },
       ];
       if (useK) ops.push({ put: { ...useK, ...bump(u), v: (use?.v ?? 0) + 1 }, if: use?.v ?? 'absent' });
       try { await this.kv.write(ops); return; }
@@ -164,7 +178,7 @@ export class KvLedger implements SpendLedger {
       const r = await this.kv.get(this.key(`R#${key}`)) as (Reservation & Item) | undefined;
       if (!r || r.state !== 'reserved') return;
       const delta = usd === null ? 0 : round(usd - r.usd);
-      const totK = this.key(`TOTAL#${r.authorization}`), allK = this.key('TOTAL#ALL'), useK = r.ws ? { pk: wsPk(r.ws), sk: `USAGE#${r.authorization}` } : null;
+      const totK = this.key(r.pool ?? `TOTAL#${r.authorization}`), allK = this.key('TOTAL#ALL'), useK = r.ws ? { pk: wsPk(r.ws), sk: `USAGE#${r.authorization}` } : null;
       const [tot, all, use] = await Promise.all([this.kv.get(totK), this.kv.get(allK), useK ? this.kv.get(useK) : undefined]) as (Totals & Item | undefined)[];
       const ops: Op[] = [{ put: { ...r, state, ...(usd === null ? {} : { settledUsd: usd }), ...extra, v: r.v! + 1 }, if: r.v! }];
       if (delta) {
@@ -188,14 +202,15 @@ export class KvLedger implements SpendLedger {
     const [tot, all, use, car] = await Promise.all([auth ? this.kv.get(this.key(`TOTAL#${auth.id}`)) : undefined, this.kv.get(this.key('TOTAL#ALL')), auth && ws ? this.kv.get({ pk: wsPk(ws), sk: `USAGE#${auth.id}` }) : undefined, this.kv.get(this.key('CARRIED'))]);
     const was = carried(car as Item | undefined, auth?.id ?? '');
     const thisTable = (all?.usd as number | undefined) ?? 0;
-    return { authorization: auth ?? null, totals: tot ?? null, carriedForAuthorization: was, thisTableUsd: thisTable, carriedUsd: was.allUsd,
+    const tiers = Object.fromEntries(await Promise.all(Object.keys(auth?.tiers ?? {}).map(async (n) => [n, (await this.kv.get(this.key(`TOTAL#${auth!.id}#${n}`))) ?? null] as const)));
+    return { authorization: auth ?? null, totals: tot ?? null, tiers, carriedForAuthorization: was, thisTableUsd: thisTable, carriedUsd: was.allUsd,
       projectUsd: (auth?.priorProjectUsd ?? 0) + thisTable + was.allUsd, workspace: use ?? null };
   }
-  /** One more workspace today, within the authorization's daily cap (sign-ins and resets). */
-  async newWorkspace(): Promise<boolean> {
+  /** One more workspace today, within the authorization's daily cap (sign-ins and resets); a tier counts against its own. */
+  async newWorkspace(tier: string | null = null): Promise<boolean> {
     const auth = await this.authorization();
-    const n = await this.kv.incr(this.key(`WSDAY#${new Date().toISOString().slice(0, 10)}`));
-    return n <= (auth?.maxNewWorkspacesPerDay ?? 0);
+    const n = await this.kv.incr(this.key(`WSDAY#${tier ? `${tier}#` : ''}${new Date().toISOString().slice(0, 10)}`));
+    return n <= ((tier ? auth?.tiers?.[tier]?.maxNewWorkspacesPerDay : auth?.maxNewWorkspacesPerDay) ?? 0);
   }
 }
 

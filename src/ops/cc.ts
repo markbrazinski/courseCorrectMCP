@@ -54,7 +54,7 @@ const DIR = join(process.env.CC_DEPLOY_DIR ?? join(ROOT, 'private/deploy'), env)
 const BUILD = join(ROOT, '.artifacts/deploy', env);
 const STACK = { data: `cc-${env}-data`, app: `cc-${env}-app` };
 interface Config { profile: string; region: string; modes: { extractor: 'none' | 'live'; analyzer: 'none' | 'live'; interpreter: 'none' | 'nova'; explainer: 'none' | 'nova'; speech: 'off' | 'polly'; ocr?: 'off' | 'textract' }; logRetentionDays: number; publicOrigin: string }
-interface Secrets { sessionKey: string; accessCode: string }
+interface Secrets { sessionKey: string; accessCode: string; /** the judge link's code (tier "judge"); created by the next deploy if missing */ judgeCode?: string }
 const readJson = <T>(f: string): T | null => (existsSync(join(DIR, f)) ? JSON.parse(readFileSync(join(DIR, f), 'utf8')) as T : null);
 const t0 = Date.now(), elapsed = () => `${((Date.now() - t0) / 1000).toFixed(0)} s`;
 
@@ -74,7 +74,7 @@ function init() {
   };
   write('config.json', { profile, region: 'us-east-1', modes: { extractor: 'none', analyzer: 'none', interpreter: 'none', explainer: 'none', speech: 'off', ocr: 'off' }, logRetentionDays: 14, publicOrigin: '' } satisfies Config);
   const word = () => randomBytes(3).toString('hex');
-  write('secrets.json', { sessionKey: randomBytes(32).toString('base64'), accessCode: `cook-${word()}-${word()}` } satisfies Secrets, 0o600);
+  write('secrets.json', { sessionKey: randomBytes(32).toString('base64'), accessCode: `cook-${word()}-${word()}`, judgeCode: `judge-${word()}-${word()}` } satisfies Secrets, 0o600);
   write('authorization.json', { id: `${env}-paid-off`, grantedBy: 'owner', at: new Date().toISOString().slice(0, 10), maxCalls: {}, maxUsd: 0, projectCeilingUsd: 0, priorProjectUsd: 0,
     perWorkspace: { maxCalls: {}, maxUsd: 0 }, maxNewWorkspacesPerDay: 30, paused: false } satisfies Authorization);
   say(`\nPaid model work is OFF until authorization.json names caps and config.json turns a service on. Next:  npm run cc -- deploy --env ${env}`);
@@ -149,6 +149,12 @@ function stage(): { zip: string; version: string; bytes: number } {
 async function deploy() {
   const id = identity();
   const sec = secrets(), auth = readJson<Authorization>('authorization.json') ?? fail('no authorization.json: run init');
+  if (!sec.judgeCode) {   // environments created before the judge link: add its code, keeping the file private
+    sec.judgeCode = `judge-${randomBytes(3).toString('hex')}-${randomBytes(3).toString('hex')}`;
+    writeFileSync(join(DIR, 'secrets.json'), JSON.stringify(sec, null, 2) + '\n'); chmodSync(join(DIR, 'secrets.json'), 0o600);
+    say(`  judge link code created in ${join(DIR, 'secrets.json')}`);
+  }
+  if (!auth.tiers?.judge) say('  note: authorization.json has no tiers.judge, so the judge link signs in but its paid calls are refused');
   const live = Object.values(cfg.modes).some((m) => m !== 'none' && m !== 'off');
   say(`Deploying ${env} to account ${id.masked} (${id.principal}), ${cfg.region}. Paid services: ${live ? JSON.stringify(cfg.modes) : 'all off'}; authorization ${auth.id} ($${auth.maxUsd} cap).`);
   const times: Record<string, string> = {};
@@ -168,7 +174,7 @@ async function deploy() {
   s = Date.now();
   deployStack(STACK.app, 'app.yaml', {
     Env: env, TableName: table, KnowledgeTableName: knowledge, BucketName: bucket, CodeKey: key, Version: b.version, SessionKey: sec.sessionKey,
-    AccessCodeSha256: createHash('sha256').update(sec.accessCode).digest('hex'), Live: live ? '1' : '0',
+    AccessCodeSha256: createHash('sha256').update(sec.accessCode).digest('hex'), JudgeCodeSha256: createHash('sha256').update(sec.judgeCode).digest('hex'), Live: live ? '1' : '0',
     Extractor: cfg.modes.extractor, Analyzer: cfg.modes.analyzer, Interpreter: cfg.modes.interpreter, Explainer: cfg.modes.explainer, Speech: cfg.modes.speech, Ocr: cfg.modes.ocr ?? 'off',
     LogRetentionDays: String(cfg.logRetentionDays), PublicOrigin: cfg.publicOrigin,
   });
@@ -178,7 +184,7 @@ async function deploy() {
   say(`  spending lifetime ${lt.lifetime} (${lt.created ? `new; carrying ${history().length} earlier table(s)` : 'continuing'})`);
   const url = stack(STACK.app)!.out.Url;
   appendFileSync(join(DIR, 'deployments.jsonl'), JSON.stringify({ at: new Date().toISOString(), version: b.version, url, account: id.masked, times }) + '\n');
-  say(`\n✓ ${env} deployed in ${elapsed()} (${Object.entries(times).map(([k, v]) => `${k} ${v}`).join(', ')})\n  URL: ${url}\n  Access code: in ${join(DIR, 'secrets.json')}\n  Next: npm run cc -- verify --env ${env}`);
+  say(`\n✓ ${env} deployed in ${elapsed()} (${Object.entries(times).map(([k, v]) => `${k} ${v}`).join(', ')})\n  URL: ${url}\n  Access code: in ${join(DIR, 'secrets.json')}\n  Judge link: ${url}?code=<judgeCode in secrets.json>\n  Next: npm run cc -- verify --env ${env}`);
 }
 /** The deployed spending authorization: written only when it changed; conditional on the version read. */
 async function recordAuthorization(table: string, auth: Authorization) {
@@ -186,7 +192,7 @@ async function recordAuthorization(table: string, auth: Authorization) {
   const { pk: _p, sk: _s, v: _v, ...was } = cur ?? {};
   if (cur && JSON.stringify(was) === JSON.stringify(auth)) return say(`  authorization ${auth.id}: unchanged`);
   await kv.write([{ put: { pk: LEDGER, sk: 'AUTH', ...auth, v: (cur?.v ?? 0) + 1 }, if: cur?.v ?? 'absent' }]);
-  say(`  authorization ${auth.id} recorded: ${PURPOSES.map((p) => `${p} ${auth.maxCalls[p] ?? 0}`).join(', ')}; $${auth.maxUsd}; per workspace $${auth.perWorkspace?.maxUsd ?? 0}; ${auth.maxNewWorkspacesPerDay ?? 0} new workspaces/day${auth.paused ? '; PAUSED' : ''}`);
+  say(`  authorization ${auth.id} recorded: ${PURPOSES.map((p) => `${p} ${auth.maxCalls[p] ?? 0}`).join(', ')}; $${auth.maxUsd}; per workspace $${auth.perWorkspace?.maxUsd ?? 0}; ${auth.maxNewWorkspacesPerDay ?? 0} new workspaces/day${auth.paused ? '; PAUSED' : ''}${Object.entries(auth.tiers ?? {}).map(([n, t]) => `; tier ${n}: $${t.maxUsd}, $${t.perWorkspace.maxUsd} per workspace, ${t.maxNewWorkspacesPerDay}/day`).join('')}`);
 }
 
 // ---------- status ----------

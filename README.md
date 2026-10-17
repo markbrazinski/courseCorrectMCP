@@ -224,6 +224,8 @@ npm run cc -- verify   --env myenv                           # smoke checks agai
 
 The access code is in `private/deploy/myenv/secrets.json`. Paid services stay off until you turn them on in `private/deploy/myenv/config.json` (`modes`, including `ocr: textract`) and give `authorization.json` caps, overall and per workspace; then deploy again. To change only the caps later, run `npm run cc -- allowances --env myenv --apply`.
 
+For judges or invited testers, `secrets.json` also holds a `judgeCode`. The link `<URL>?code=<judgeCode>` opens the sign-in page with that code filled in and one **Start cooking** button, so nothing signs in until someone presses it. Workspaces opened with it spend from their own allowance (`tiers.judge` in `authorization.json`), separate from the regular code's caps.
+
 To use the deployment from an MCP client, select **MCP client** in the companion after signing in, or `POST /signin` with `{"code": "…"}` as JSON. Send the token it returns as `Authorization: Bearer …` to `/mcp`.
 
 The same CLI runs `status`, `backup`, `restore`, `destroy`, `maintenance`, and an emergency `stop` and `start`. See [SETUP.md](SETUP.md#deploy-to-aws-lambda) for every command.

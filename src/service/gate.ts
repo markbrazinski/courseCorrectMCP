@@ -3,7 +3,7 @@
 // stored only as SHA-256 hashes; the cookie is HMAC-SHA256 signed, HttpOnly, Secure and SameSite=Strict. Failed sign-ins
 // are throttled per source address; new workspaces are capped per day by the live authorization.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { KvLedger } from '../authoring/nova.ts';
+import { tierOf, type KvLedger } from '../authoring/nova.ts';
 import type { Kv } from './kv.ts';
 
 export const COOKIE = 'cc_ws';
@@ -12,13 +12,15 @@ const FAILS_PER_WINDOW = 10, WINDOW_MS = 15 * 60_000;
 export const sha256hex = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 const same = (a: Buffer, b: Buffer) => a.length === b.length && timingSafeEqual(a, b);
 
-export interface GateOptions { kv: Kv; ledger: KvLedger; codeHashes: string[]; sessionKey: Buffer; secure?: boolean; now?: () => number }
+/** tierCodes: codes that open a workspace under a tier's own allowance (Authorization.tiers), e.g. { judge: [hash] } for the judge link. */
+export interface GateOptions { kv: Kv; ledger: KvLedger; codeHashes: string[]; tierCodes?: Record<string, string[]>; sessionKey: Buffer; secure?: boolean; now?: () => number }
 export class Gate {
   private readonly o: GateOptions;
   constructor(o: GateOptions) {
     this.o = o;
     if (o.sessionKey.length < 32) throw new Error('CC_SESSION_KEY must be at least 32 bytes (base64)');
     if (!o.codeHashes.length || o.codeHashes.some((h) => !/^[0-9a-f]{64}$/.test(h))) throw new Error('CC_ACCESS_CODE_SHA256 must list SHA-256 hex hashes');
+    if (Object.values(o.tierCodes ?? {}).flat().some((h) => !/^[0-9a-f]{64}$/.test(h))) throw new Error('tier access codes must be SHA-256 hex hashes');
   }
   private now() { return this.o.now?.() ?? Date.now(); }
   private sign(payload: string) { return createHmac('sha256', this.o.sessionKey).update(payload).digest('base64url'); }
@@ -47,11 +49,13 @@ export class Gate {
     return `${COOKIE}=${ws}.${exp}.${this.sign(`${ws}.${exp}`)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${MAX_AGE_S}${this.o.secure === false ? '' : '; Secure'}`;
   }
 
-  /** A new, empty workspace (sign-in or Start over), within today's cap. The index row is for the owner's tooling. */
-  async newWorkspace(via: 'signin' | 'reset', from?: string): Promise<string | null> {
-    if (!(await this.o.ledger.newWorkspace())) return null;
+  /** A new, empty workspace (sign-in or Start over), within today's cap. The GATE row indexes it for the owner's tooling and
+   *  holds its tier (the ledger reads it); Start over keeps the tier of the workspace it replaces. */
+  async newWorkspace(via: 'signin' | 'reset', from?: string, tier?: string | null): Promise<string | null> {
+    const t = tier ?? (via === 'reset' ? await tierOf(this.o.kv, from ?? null) : null);
+    if (!(await this.o.ledger.newWorkspace(t))) return null;
     const ws = `ws_${randomBytes(16).toString('base64url')}`;
-    await this.o.kv.write([{ put: { pk: 'GATE', sk: `WS#${ws}`, ws, via, from: from ?? null, at: new Date(this.now()).toISOString() }, if: 'absent' }]);
+    await this.o.kv.write([{ put: { pk: 'GATE', sk: `WS#${ws}`, ws, via, from: from ?? null, ...(t ? { tier: t } : {}), at: new Date(this.now()).toISOString() }, if: 'absent' }]);
     return ws;
   }
 
@@ -60,17 +64,21 @@ export class Gate {
     const failKey = { pk: 'GATE', sk: `FAIL#${sha256hex(source).slice(0, 16)}#${window}` };
     if (((await this.o.kv.get(failKey))?.n ?? 0) >= FAILS_PER_WINDOW) return { ok: false, status: 429, message: 'Too many attempts. Wait 15 minutes, then try again.' };
     const h = Buffer.from(sha256hex(code.trim()));
-    if (!this.o.codeHashes.some((x) => same(Buffer.from(x), h))) { await this.o.kv.incr(failKey); return { ok: false, status: 401, message: "That access code isn't right." }; }
-    const ws = await this.newWorkspace('signin');
+    const matches = (hashes: string[]) => hashes.some((x) => same(Buffer.from(x), h));
+    const tier = Object.entries(this.o.tierCodes ?? {}).find(([, hashes]) => matches(hashes))?.[0] ?? null;
+    if (!tier && !matches(this.o.codeHashes)) { await this.o.kv.incr(failKey); return { ok: false, status: 401, message: "That access code isn't right." }; }
+    const ws = await this.newWorkspace('signin', undefined, tier);
     return ws ? { ok: true, ws } : { ok: false, status: 503, message: "Today's new-workspace limit is reached. Try again tomorrow, or contact the entrant." };
   }
 }
 
 /** The sign-in page (served instead of the companion until there is a session). Plain HTML, no script. */
-export function signInPage(message = '') {
+/** With `code` (from an invitation link's ?code=), the code is filled in and one button starts: nothing signs in on a GET, so
+ *  link previews and crawlers open no workspace. no-referrer keeps the code out of any outgoing request. */
+export function signInPage(message = '', code = '') {
   const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
   // the companion's Index Card palette and type (src/web/index.html), so signing in looks like the app it opens
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer">
 <title>CourseCorrect · Sign in</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@600;700&family=Source+Sans+3:wght@400;600;700&display=swap">
@@ -88,7 +96,7 @@ input{width:100%;font:inherit;font-size:18px;padding:12px 14px;border:1.5px soli
 button{margin-top:16px;width:100%;font:inherit;font-size:18px;font-weight:700;padding:13px 20px;border:2px solid var(--cc-action);border-radius:10px;background:var(--cc-action);color:var(--cc-on-action);cursor:pointer}
 .err{color:var(--cc-attention);background:var(--cc-attention-bg);border-radius:8px;padding:10px 12px;margin:14px 0 0;font-weight:600}</style></head><body>
 <header>CourseCorrect</header><div class="wrap"><main>
-<h1>Sign in</h1><p>Enter the access code from the testing instructions. Each sign-in opens its own private kitchen.</p>
-<form method="post" action="/signin"><label for="code">Access code</label><input id="code" name="code" autocomplete="off" required autofocus>
-<button type="submit">Sign in</button>${message ? `<p class="err" role="alert">${esc(message)}</p>` : ''}</form></main></div></body></html>`;
+${code ? '<h1>Welcome</h1><p>Your invitation has the access code filled in. Each start opens your own private kitchen.</p>' : '<h1>Sign in</h1><p>Enter the access code from the testing instructions. Each sign-in opens its own private kitchen.</p>'}
+<form method="post" action="/signin"><label for="code">Access code</label><input id="code" name="code" autocomplete="off" required${code ? ` value="${esc(code)}"` : ' autofocus'}>
+<button type="submit"${code ? ' autofocus' : ''}>${code ? 'Start cooking' : 'Sign in'}</button>${message ? `<p class="err" role="alert">${esc(message)}</p>` : ''}</form></main></div></body></html>`;
 }

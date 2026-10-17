@@ -34,6 +34,7 @@ Every live call is reserved against an authorization before it's made, then sett
 | `projectCeilingUsd`, `priorProjectUsd` | A ceiling across authorizations, and what earlier ones already spent |
 | `maxUsdByPurpose` | Optional dollar cap per purpose inside `maxUsd` |
 | `perWorkspace`, `maxNewWorkspacesPerDay`, `paused` | Deployed only: caps per signed-in workspace, sign-ins per UTC day, and a stop switch |
+| `tiers` | Deployed only: a separate allowance per tier, for workspaces opened with that tier's code. `tiers.judge` (`maxCalls`, `maxUsd`, `perWorkspace`, `maxNewWorkspacesPerDay`) is the judge link's budget. The project ceiling and `paused` still apply |
 
 Polly audio is cached by its exact text and settings in `.artifacts/speech-cache/`, so a repeated reply costs nothing.
 
@@ -51,7 +52,7 @@ Polly audio is cached by its exact text and settings in `.artifacts/speech-cache
 | `GET /imports/:jobId`, `GET /drafts/:id`, `POST /drafts/:id/{append-text,save}`, `GET /recipes/:id` | Import status, pasting missing steps, saving, and a saved recipe with each ingredient use's analysis |
 | `GET /authoring/drafts/:id/requirements`, `GET /authoring/vocabulary`, `POST /authoring/drafts/:id/{assertions,revisions}` | Owner review and repair of a draft (bearer `CC_OWNER_TOKEN`) |
 | `POST /admin/start-over` | Local, bearer `CC_OWNER_TOKEN`: the kitchen moves to a new, empty workspace. The bundled recipes stay |
-| `GET/POST /signin`, `POST /workspace/reset` | Deployed: the access-code sign-in (a new workspace per sign-in, in an HttpOnly signed cookie, or a bearer token for MCP clients), and start over for that workspace |
+| `GET/POST /signin`, `POST /workspace/reset` | Deployed: the access-code sign-in (a new workspace per sign-in, in an HttpOnly signed cookie, or a bearer token for MCP clients), and start over for that workspace (it keeps the workspace's tier). Any page with `?code=` shows the sign-in form with that code filled in |
 
 ## Checks
 
@@ -81,7 +82,7 @@ One environment is two CloudFormation stacks:
 Nothing charges while idle except stored data. The commands run with an AWS CLI profile for a non-root identity that may deploy, in `us-east-1`. Local files for each environment live in `private/deploy/<env>/` (git-ignored; override with `CC_DEPLOY_DIR`).
 
 ```sh
-npm run cc -- init       --env <env> --profile <aws-profile>   # config.json, secrets.json (mode 600), a zero-cap authorization.json
+npm run cc -- init       --env <env> --profile <aws-profile>   # config.json, secrets.json (mode 600: access code, judge link code), a zero-cap authorization.json
 npm run cc -- stage      --env <env>                           # build and zip the bundle (no AWS calls)
 npm run cc -- deploy     --env <env>                           # stage, deploy both stacks, record the authorization; prints the URL
 npm run cc -- verify     --env <env> [--paid]                  # smoke checks on the URL (--paid: one interpretation, one spoken reply, one import)
